@@ -1,0 +1,8 @@
+{
+  "sequence_length": 50,
+  "dropout_rate": 0.3,
+  "learning_rate": 0.001,
+  "batch_size": 64,
+  "epochs": 50,
+  "patience": 5
+}
