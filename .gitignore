@@ -1,0 +1,89 @@
+hyperparam_tuning/
+data/models/checkpoints/
+data/intermediate/
+ktuner_dir/
+*/ktuner_dir_dl/
+process/.venv/
+process/~
+__pycache__/
+hyperband/
+*_report.txt
+
+
+# Node.js specific
+node_modules/
+npm-debug.log
+yarn-error.log
+.env
+
+**/*Zone.Identifier
+
+# Logs
+logs
+*.log
+logs/*.log
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Optional coverage directory
+coverage/
+
+# Optional build directory
+build/
+
+# Optional output directories
+dist/
+out/
+
+# Kotlin specific
+*.iml
+.gradle/
+build/
+.idea/
+.DS_Store
+out/
+*.log
+*.swp
+*.tmp
+*.temp
+*.orig
+*.bak
+*.class
+*.jar
+*.war
+*.ear
+*.apk
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.gz
+*.class
+*.dex
+*.apk
+*.ap_
+*.dex
+*.class
+*.so
+*.dll
+*.exe
+*.o
+*.a
+*.lib
+*.nib
+*.pyc
+*.pyo
+*.pyd
+*.pid
+*.pid.lock
+*.pidfile
