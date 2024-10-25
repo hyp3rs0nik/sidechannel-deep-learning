@@ -3,11 +3,12 @@ import joblib
 import pandas as pd
 import numpy as np
 from scipy.signal import find_peaks
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, KFold
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.utils.class_weight import compute_class_weight
 
 def load_and_preprocess_data(accel_path, keys_path):
     accel_data = pd.read_csv(accel_path)
@@ -27,7 +28,7 @@ def load_and_preprocess_data(accel_path, keys_path):
         keys_data,
         on="timestamp",
         direction="nearest",
-        tolerance=pd.Timedelta("200ms"),
+        tolerance=pd.Timedelta("100ms"),
     )
 
     return merged_data
@@ -42,13 +43,9 @@ def extract_features(cleaned_data):
         < 0
     ).astype(int)
 
-    # Root Mean Square Error (RMSE) over a window
-    cleaned_data["rmse"] = (
-        cleaned_data["rms"].rolling(window=rolling_window, min_periods=1).mean()
-        - cleaned_data["rms"]
-    ) ** 2
-    cleaned_data["rmse"] = (
-        cleaned_data["rmse"].rolling(window=rolling_window, min_periods=1).mean() ** 0.5
+    # Corrected RMSE calculation
+    cleaned_data["rmse"] = cleaned_data["rms"].rolling(window=rolling_window, min_periods=1).apply(
+        lambda x: np.sqrt(np.mean((x - x.mean()) ** 2)), raw=False
     )
 
     # Extract dimensional features for each axis
@@ -75,15 +72,18 @@ def extract_features(cleaned_data):
         (cleaned_data[["x", "y", "z"]] ** 2).sum(axis=1)
     )
     for feature in ["min", "max", "num_peaks", "num_crests"]:
-        cleaned_data[f"magnitude_{feature}"] = (
-            cleaned_data["magnitude"]
-            .rolling(window=rolling_window, min_periods=1)
-            .agg(
-                feature
-                if feature in ["min", "max"]
-                else lambda x: len(find_peaks(x if feature == "num_peaks" else -x)[0])
+        if feature in ["min", "max"]:
+            cleaned_data[f"magnitude_{feature}"] = (
+                cleaned_data["magnitude"]
+                .rolling(window=rolling_window, min_periods=1)
+                .agg(feature)
             )
-        )
+        else:
+            cleaned_data[f"magnitude_{feature}"] = (
+                cleaned_data["magnitude"]
+                .rolling(window=rolling_window, min_periods=1)
+                .apply(lambda x: len(find_peaks(x if feature == "num_peaks" else -x)[0]), raw=True)
+            )
 
     # Signal Magnitude Area (SMA)
     cleaned_data["sma"] = (
@@ -96,7 +96,6 @@ def extract_features(cleaned_data):
 
     return cleaned_data
 
-
 def randomized_search_tuning(X_train, y_train, model_type="RandomForest"):
     if model_type == "RandomForest":
         param_distributions = {
@@ -106,7 +105,7 @@ def randomized_search_tuning(X_train, y_train, model_type="RandomForest"):
             'min_samples_leaf': [1, 2, 4],
             'bootstrap': [True, False],
         }
-        model = RandomForestClassifier(random_state=42)
+        model = RandomForestClassifier(random_state=42, class_weight='balanced')
     elif model_type == "XGBoost":
         param_distributions = {
             'n_estimators': [50, 100, 200],
@@ -131,30 +130,45 @@ def randomized_search_tuning(X_train, y_train, model_type="RandomForest"):
     print(f"Best Parameters for {model_type}: {rand_search.best_params_}")
     return rand_search.best_estimator_
 
-
 def train_and_evaluate_stacking(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train_full, X_test, y_train_full, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
-    # Train RandomForest and XGBoost with hyperparameter tuning
-    rf_model = randomized_search_tuning(X_train, y_train, model_type="RandomForest")
-    xgb_model = randomized_search_tuning(X_train, y_train, model_type="XGBoost")
+    n_splits = 5
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    n_classes = len(np.unique(y))
+    rf_oof_preds = np.zeros((X_train_full.shape[0], n_classes))
+    xgb_oof_preds = np.zeros((X_train_full.shape[0], n_classes))
 
-    # Meta features (predictions from both models)
-    rf_pred_train = rf_model.predict_proba(X_train)
-    xgb_pred_train = xgb_model.predict_proba(X_train)
-    
+
+    rf_model = RandomForestClassifier(random_state=42, class_weight='balanced')
+    xgb_model = XGBClassifier(random_state=42, eval_metric='mlogloss')
+
+    for train_index, valid_index in kf.split(X_train_full):
+        X_train, X_valid = X_train_full.iloc[train_index], X_train_full.iloc[valid_index]
+        y_train, y_valid = y_train_full.iloc[train_index], y_train_full.iloc[valid_index]
+
+        rf_model_fold = randomized_search_tuning(X_train, y_train, model_type="RandomForest")
+        xgb_model_fold = randomized_search_tuning(X_train, y_train, model_type="XGBoost")
+
+        rf_oof_preds[valid_index] = rf_model_fold.predict_proba(X_valid)
+        xgb_oof_preds[valid_index] = xgb_model_fold.predict_proba(X_valid)
+    meta_train = np.hstack((rf_oof_preds, xgb_oof_preds))
+
+    rf_model = randomized_search_tuning(X_train_full, y_train_full, model_type="RandomForest")
+    xgb_model = randomized_search_tuning(X_train_full, y_train_full, model_type="XGBoost")
+
+
     rf_pred_test = rf_model.predict_proba(X_test)
     xgb_pred_test = xgb_model.predict_proba(X_test)
-
-    # Combine predictions from both models as meta-features
-    meta_train = np.hstack((rf_pred_train, xgb_pred_train))
     meta_test = np.hstack((rf_pred_test, xgb_pred_test))
 
-    # Train a Logistic Regression meta-model
-    meta_model = LogisticRegression(random_state=42)
-    meta_model.fit(meta_train, y_train)
 
-    # Meta-model predictions
+    meta_model = LogisticRegression(random_state=42, class_weight='balanced')
+    meta_model.fit(meta_train, y_train_full)
+
+
     y_pred = meta_model.predict(meta_test)
     accuracy = accuracy_score(y_test, y_pred)
     report = classification_report(y_test, y_pred)
@@ -162,15 +176,18 @@ def train_and_evaluate_stacking(X, y):
     print(f"Stacking Model Accuracy: {accuracy}")
     print(f"Stacking Model Classification Report:\n{report}")
 
-    return meta_model
+    # Save all models
+    save_model(rf_model, model_name="rf_model")
+    save_model(xgb_model, model_name="xgb_model")
+    save_model(meta_model, model_name="meta_model")
 
+    return meta_model
 
 def save_model(model, model_name, path="./data/models/machine_learning"):
     model_path = os.path.join(path, f"{model_name}.pkl")
     os.makedirs(path, exist_ok=True)
     joblib.dump(model, model_path)
     print(f"Model saved to: {model_path}")
-
 
 if __name__ == "__main__":
     accel_data_path = "./data/training/accel.csv"
@@ -179,6 +196,9 @@ if __name__ == "__main__":
     data = load_and_preprocess_data(accel_data_path, keys_data_path)
     features = extract_features(data)
 
+    # Ensure proper alignment between X and y
+    data = data.dropna(subset=['key'])
+    features = features.loc[data.index].fillna(0)
     X = features[
         [
             "rms",
@@ -202,13 +222,15 @@ if __name__ == "__main__":
             "magnitude_num_crests",
             "sma",
         ]
-    ].fillna(0)
+    ]
 
-    y = data["key"].dropna()
-    X = X.loc[y.index]
+    y = data["key"]
 
-    # Train and evaluate stacking model
+    print("Class distribution in target variable:")
+    print(y.value_counts())
+
+    classes = np.unique(y)
+    class_weights = compute_class_weight('balanced', classes=classes, y=y)
+    class_weight_dict = dict(zip(classes, class_weights))
+
     meta_model = train_and_evaluate_stacking(X, y)
-
-    # Save the stacking model
-    save_model(meta_model, model_name="stacking_model")
