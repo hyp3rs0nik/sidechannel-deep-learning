@@ -1,7 +1,6 @@
 pandas
 numpy
 scikit-learn
-tensorflow
 keras-tuner
 scipy
 pyyaml
