@@ -40,7 +40,6 @@ merged_data = pd.merge_asof(
     tolerance=pd.Timedelta("100ms")
 ).dropna(subset=["key"]) 
 
-
 features_denoise_core = extract_features_dynamically(merged_data, selected_features)
 
 X = features_denoise_core.drop(columns="key")

@@ -16,7 +16,7 @@ import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from feature_calculations import feature_functions  # Import feature functions
+from feature_calculations import feature_functions
 
 def load_config(model_type):
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -35,14 +35,14 @@ def load_data(dataset_dir):
 
 def merge_data(accel_data, keys_data):
     merged_data = pd.merge_asof(
-        accel_data.set_index('timestamp'),
-        keys_data.set_index('timestamp'),
-        left_index=True,
-        right_index=True,
-        direction='nearest',
+        accel_data.sort_values("timestamp"),
+        keys_data.sort_values("timestamp"),
+        on="timestamp",
+        direction="nearest",
         tolerance=pd.Timedelta("100ms")
-    ).dropna(subset=["key"])  # Drop rows without key data
-    return merged_data.reset_index()
+    ).dropna(subset=["key"])
+    return merged_data
+
 
 def apply_fft_denoise(data, cutoff=0.1):
     data_fft = rfft(data)
@@ -51,25 +51,18 @@ def apply_fft_denoise(data, cutoff=0.1):
     return irfft(data_fft, n=len(data))
 
 def extract_features(merged_data):
-    # Calculate magnitude for x, y, z without any rolling window or individual row calculation
-    merged_data['magnitude'] = np.sqrt(
-        merged_data['x']**2 + merged_data['y']**2 + merged_data['z']**2
-    )
-    
-    # Specify the selected features exactly as in the checkpoint code
     selected_features = [
         "rms", "rmse", "x_min", "x_max", "y_min", "y_max",
         "z_min", "z_max", "magnitude_min", "magnitude_max", "sma",
         "displacement_2d"
     ]
     
-    # Calculate each feature and ensure each produces a single summary value
     feature_data = {
-        feature: feature_functions[feature](merged_data).mean()  # Using mean or aggregate function for single output
+        feature: feature_functions[feature](merged_data).mean() 
         if isinstance(feature_functions[feature](merged_data), pd.Series) else feature_functions[feature](merged_data)
         for feature in selected_features
     }
-    features_df = pd.DataFrame([feature_data])  # Wrap feature_data in list to create a single-row DataFrame
+    features_df = pd.DataFrame([feature_data])
     
     return pd.concat([merged_data.reset_index(drop=True), features_df], axis=1)
 
