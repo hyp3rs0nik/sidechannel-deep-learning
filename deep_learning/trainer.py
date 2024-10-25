@@ -6,7 +6,7 @@ from scipy.signal import find_peaks
 from argparse import ArgumentParser
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import LabelEncoder
 from tensorflow.keras.utils import to_categorical
@@ -14,9 +14,9 @@ from tensorflow.keras.callbacks import EarlyStopping
 from scipy.fft import rfft, irfft
 import optuna
 
-def load_config(config_path='lstm_config.json'):
+def load_config(model_type):
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    absolute_config_path = os.path.join(script_dir, config_path)
+    absolute_config_path = os.path.join(script_dir, f'{model_type}_config.json')
     with open(absolute_config_path, 'r') as file:
         return json.load(file)
 
@@ -68,10 +68,9 @@ def extract_features(merged_data):
     merged_data['y_denoised'] = apply_fft_denoise(merged_data['y'].values)
     merged_data['z_denoised'] = apply_fft_denoise(merged_data['z'].values)
 
-    # Calculating magnitude
+    merged_data.drop(columns=['x', 'y', 'z'], inplace=True)
     merged_data['magnitude'] = np.sqrt(merged_data['x_denoised']**2 + merged_data['y_denoised']**2 + merged_data['z_denoised']**2)
 
-    # Feature extraction
     features = pd.DataFrame({
         "rms": calculate_rms(merged_data['magnitude']),
         "rmse": calculate_rmse(merged_data['magnitude']),
@@ -92,13 +91,13 @@ def extract_features(merged_data):
         "magnitude_max": merged_data['magnitude'].max(),
         "magnitude_num_peaks": calculate_peaks(merged_data['magnitude']),
         "magnitude_num_crests": calculate_crests(merged_data['magnitude']),
-        "sma": calculate_sma(merged_data['magnitude']).mean()  # Mean value of SMA
+        "sma": calculate_sma(merged_data['magnitude']).mean()
     }, index=[0])
 
     return pd.concat([merged_data.reset_index(drop=True), features], axis=1)
 
 def prepare_data(merged_data):
-    X = merged_data[['x', 'y', 'z']].values
+    X = merged_data[['x_denoised', 'y_denoised', 'z_denoised']].values
     y = merged_data['key'].values
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
@@ -113,24 +112,24 @@ def create_sequences(X, y, sequence_length):
         labels.append(y[i + sequence_length])
     return np.array(sequences), np.array(labels)
 
-def build_model(trial, input_shape, num_classes):
+def build_model(trial, input_shape, num_classes, model_type):
     model = Sequential()
-    
-    # Suggest hyperparameters
     units = trial.suggest_int('units', 50, 150, step=25)
     dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.5)
     learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
 
-    model.add(LSTM(units=units, input_shape=input_shape))
+    if model_type == 'lstm':
+        model.add(LSTM(units=units, input_shape=input_shape))
+    elif model_type == 'gru':
+        model.add(GRU(units=units, input_shape=input_shape))
+
     model.add(Dropout(dropout_rate))
     model.add(Dense(num_classes, activation='softmax'))
-
     model.compile(optimizer=Adam(learning_rate=learning_rate), loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
-def objective(trial):
-    model = build_model(trial, (config['sequence_length'], X_train.shape[2]), y_train.shape[1])
-
+def objective(trial, model_type):
+    model = build_model(trial, (config['sequence_length'], X_train.shape[2]), y_train.shape[1], model_type)
     early_stopping = EarlyStopping(monitor='val_loss', patience=config['patience'], restore_best_weights=True)
 
     history = model.fit(X_train, y_train, validation_data=(X_test, y_test), 
@@ -149,12 +148,12 @@ def evaluate_and_save_model(model, X_test, y_test, model_save_path):
 
 def main():
     parser = ArgumentParser()
+    parser.add_argument('--model', choices=['lstm', 'gru'], required=True, help='Type of model to use: lstm or gru')
     parser.add_argument('--dataset', default='./data/training/', help='Path to dataset folder containing accel.csv and keys.csv')
-    parser.add_argument('--config', default='lstm_config.json', help='Path to config file')
     args = parser.parse_args()
 
     global config
-    config = load_config(args.config)
+    config = load_config(args.model)
 
     accel_data, keys_data = load_data(args.dataset)
     merged_data = merge_data(accel_data, keys_data)
@@ -167,12 +166,13 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X_seq, y_seq, test_size=0.2, random_state=42)
 
     study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=20)
+    study.optimize(lambda trial: objective(trial, args.model), n_trials=50)
 
     print(f"Best hyperparameters: {study.best_params}")
 
-    best_model = build_model(study.best_trial, (config['sequence_length'], X_train.shape[2]), y_train.shape[1])
-    evaluate_and_save_model(best_model, X_test, y_test, './data/model/deep_learning/lstm.keras')
+    best_model = build_model(study.best_trial, (config['sequence_length'], X_train.shape[2]), y_train.shape[1], args.model)
+    model_path = './data/model/deep_learning/' + args.model + '.keras'
+    evaluate_and_save_model(best_model, X_test, y_test, model_path)
 
 if __name__ == "__main__":
     main()

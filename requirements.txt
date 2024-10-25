@@ -7,3 +7,4 @@ pyyaml
 tensorflow[and-cuda]
 tensorrt
 optuna
+optuna-integration[tfkeras]

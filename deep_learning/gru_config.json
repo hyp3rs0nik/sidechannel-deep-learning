@@ -1,0 +1,6 @@
+{
+    "sequence_length": 50,
+    "batch_size": 32,
+    "epochs": 100,
+    "patience": 10
+}
