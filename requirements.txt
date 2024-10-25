@@ -6,4 +6,5 @@ keras-tuner
 scipy
 pyyaml
 tensorflow[and-cuda]
-tensorrt 
+tensorrt
+optuna

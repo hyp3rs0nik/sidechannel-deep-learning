@@ -9,6 +9,7 @@ __pycache__/
 hyperband/
 *_report.txt
 *.pkl
+*.keras
 
 
 # Node.js specific
