@@ -105,6 +105,7 @@ def prepare_data(merged_data):
     if np.isinf(X_scaled).any():
         logging.error("Infinite values found in features.")
         sys.exit(1)
+    # Keep tensors on CPU
     X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
     y_tensor = torch.tensor(y_encoded, dtype=torch.long)
     return X_tensor, y_tensor, label_encoder, scaler
@@ -174,8 +175,10 @@ def train_fold(model, optimizer, criterion, scaler, train_loader, device, cleanu
     total_loss = 0
     correct = 0
     for batch_idx, (X_batch, y_batch) in enumerate(train_loader, 1):
+        # Move data to GPU
         X_batch = X_batch.to(device, non_blocking=True)
         y_batch = y_batch.to(device, non_blocking=True)
+        
         optimizer.zero_grad()
         with autocast():
             outputs = model(X_batch)
@@ -203,8 +206,10 @@ def validate_fold(model, criterion, scaler, val_loader, device):
     correct_val = 0
     with torch.no_grad():
         for X_batch, y_batch in val_loader:
+            # Move data to GPU
             X_batch = X_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
+            
             with autocast():
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
@@ -222,18 +227,46 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
     batch_size = trial.suggest_categorical('batch_size', [32, 64, 128, 256])
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
     val_accuracies = []
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y[train_idx], y[val_idx]
+    logging.info(f"Trial {trial.number}: Starting training with hidden_size={hidden_size}, "
+                 f"dropout_rate={dropout_rate:.2f}, learning_rate={learning_rate:.6f}, batch_size={batch_size}")
+    
+    # Convert X and y to CPU and NumPy if they're tensors
+    if isinstance(X, torch.Tensor):
+        X_cpu = X.cpu().numpy()
+    else:
+        X_cpu = X
+    if isinstance(y, torch.Tensor):
+        y_cpu = y.cpu().numpy()
+    else:
+        y_cpu = y
+    
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_cpu, y_cpu), 1):
+        X_train = X[train_idx]
+        X_val = X[val_idx]
+        y_train = y[train_idx]
+        y_val = y[val_idx]
         try:
             model = RNNModel(model_type, X_train.shape[2], hidden_size, dropout_rate, num_classes).to(device)
             criterion = nn.CrossEntropyLoss()
             optimizer = optim.Adam(model.parameters(), lr=learning_rate)
             train_dataset = TensorDataset(X_train, y_train)
             val_dataset = TensorDataset(X_val, y_val)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=0)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=0)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                pin_memory=True,
+                num_workers=6,
+                persistent_workers=False
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                pin_memory=True,
+                num_workers=6,
+                persistent_workers=False
+            )
             early_stopping = EarlyStopping(patience=config['patience'])
             scaler = GradScaler()
             cleanup_interval = max(1, len(train_loader) // 10)
@@ -246,7 +279,7 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
                 print_epoch_progress(fold, epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
                 early_stopping(val_loss)
                 if early_stopping.early_stop:
-                    print(f"Trial {trial.number}, Fold {fold}: Early stopping at epoch {epoch}")
+                    logging.info(f"Trial {trial.number}, Fold {fold}: Early stopping at epoch {epoch}")
                     break
             print()
             val_accuracies.append(val_acc.item())
@@ -262,20 +295,28 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
                 raise e
     torch.cuda.empty_cache()
     avg_val_acc = np.mean(val_accuracies)
-    print(f"Trial {trial.number}: Average Validation Accuracy: {avg_val_acc:.4f}")
+    logging.info(f"Trial {trial.number}: Average Validation Accuracy: {avg_val_acc:.4f}")
     return avg_val_acc
 
 def evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_save_path):
     model.eval()
     test_dataset = TensorDataset(X_test, y_test)
-    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, pin_memory=True, num_workers=0)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=128,
+        shuffle=False,
+        pin_memory=True,  # Re-enabled pin_memory
+        num_workers=4      # Adjust based on your CPU cores
+    )
     criterion = nn.CrossEntropyLoss()
     total_loss = 0
     correct = 0
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
+            # Move data to GPU
             X_batch = X_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
+            
             with autocast():
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
@@ -327,8 +368,18 @@ def main():
     )
     logging.info(f"X_train_full shape: {X_train_full.shape}")
     logging.info(f"X_test shape: {X_test.shape}")
-    X_train_full = X_train_full.to(device, non_blocking=True)
-    y_train_full = y_train_full.to(device, non_blocking=True)
+    train_dataset = TensorDataset(X_train_full, y_train_full)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=best_trial.params['batch_size'],
+        shuffle=True,
+        pin_memory=True,  # Re-enabled pin_memory
+        num_workers=4      # Adjust based on your CPU cores
+    )
+    scaler_final = GradScaler()
+    early_stopping_final = EarlyStopping(patience=config['patience'])
+    logging.info("Starting final training on combined training and validation sets...")
+    cleanup_interval = max(1, len(train_loader) // 10)
     model = RNNModel(
         args.model,
         X_train_full.shape[2],
@@ -341,12 +392,6 @@ def main():
     logging.info(f"Number of features: {X_train_full.shape[2]}")
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=best_trial.params['learning_rate'])
-    train_dataset = TensorDataset(X_train_full, y_train_full)
-    train_loader = DataLoader(train_dataset, batch_size=best_trial.params['batch_size'], shuffle=True, pin_memory=True, num_workers=0)
-    scaler_final = GradScaler()
-    early_stopping_final = EarlyStopping(patience=config['patience'])
-    logging.info("Starting final training on combined training and validation sets...")
-    cleanup_interval = max(1, len(train_loader) // 10)
     for epoch in range(1, config['epochs'] + 1):
         start_time = time.time()
         train_loss, train_acc = train_fold(
@@ -371,7 +416,7 @@ def main():
     torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    device = torch.device("cuda")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     selected_features = [
         "rms", "rmse", "x_min", "x_max", "y_min", "y_max",
         "z_min", "z_max", "magnitude_min", "magnitude_max", "sma",
