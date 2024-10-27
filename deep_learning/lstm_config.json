@@ -6,5 +6,5 @@
   "sampling_rate": 100,
   "patience": 3,
   "weight_decay": 0.0001,
-  "max_trials": 50
+  "max_trials": 25
 }

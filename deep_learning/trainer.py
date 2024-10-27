@@ -5,7 +5,7 @@ import sys
 import numpy as np
 import pandas as pd
 from argparse import ArgumentParser
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 import torch
 import torch.nn as nn
@@ -16,9 +16,11 @@ from scipy.fft import rfft, irfft
 import gc
 import pickle
 from torch.cuda.amp import autocast, GradScaler
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+import logging
+import time
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from feature_calculations import feature_functions
 
 def set_seed(seed=42):
@@ -72,18 +74,18 @@ def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, sele
             if feature in feature_functions:
                 merged_data[feature] = feature_functions[feature](merged_data)
             else:
-                print(f"Feature '{feature}' not found in feature_functions.")
+                logging.error(f"Feature '{feature}' not found in feature_functions.")
                 sys.exit(1)
     required_features = selected_features + ["key"]
     missing_features = [feat for feat in required_features if feat not in merged_data.columns]
     if missing_features:
-        print(f"Missing features after computation: {missing_features}")
+        logging.error(f"Missing features after computation: {missing_features}")
         sys.exit(1)
     return merged_data
 
 def extract_features_dynamically(data, selected_features):
     if not selected_features:
-        print("No features selected for extraction.")
+        logging.error("No features selected for extraction.")
         sys.exit(1)
     feature_data = {feature: data[feature] for feature in selected_features}
     features_df = pd.DataFrame(feature_data)
@@ -97,6 +99,12 @@ def prepare_data(merged_data):
     y_encoded = label_encoder.fit_transform(y)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    if np.isnan(X_scaled).any():
+        logging.error("NaN values found in features.")
+        sys.exit(1)
+    if np.isinf(X_scaled).any():
+        logging.error("Infinite values found in features.")
+        sys.exit(1)
     X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
     y_tensor = torch.tensor(y_encoded, dtype=torch.long)
     return X_tensor, y_tensor, label_encoder, scaler
@@ -110,12 +118,15 @@ def create_sequences(X, y, sequence_length):
     return torch.stack(sequences), torch.tensor(labels)
 
 class RNNModel(nn.Module):
-    def __init__(self, model_type, input_size, hidden_size, dropout_rate, num_classes):
+    def __init__(self, model_type, input_size, hidden_size, dropout_rate, num_classes, num_layers=1):
         super(RNNModel, self).__init__()
         if model_type == 'lstm':
-            self.rnn = nn.LSTM(input_size, hidden_size, batch_first=True)
+            self.rnn = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True)
         elif model_type == 'gru':
-            self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
+            self.rnn = nn.GRU(input_size, hidden_size, num_layers=num_layers, batch_first=True)
+        else:
+            logging.error(f"Unsupported model type: {model_type}")
+            sys.exit(1)
         self.dropout = nn.Dropout(dropout_rate)
         self.fc = nn.Linear(hidden_size, num_classes)
     
@@ -146,80 +157,113 @@ class EarlyStopping:
             self.best_score = score
             self.counter = 0
 
-def objective(trial, config, X_train, X_val, y_train, y_val, num_classes, model_type):
-    hidden_size = trial.suggest_int('hidden_size', 50, 150, step=25)
-    dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.5)
-    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-    
-    model = RNNModel(model_type, X_train.shape[2], hidden_size, dropout_rate, num_classes).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    train_dataset = TensorDataset(X_train, y_train)
-    val_dataset = TensorDataset(X_val, y_val)
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, pin_memory=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, pin_memory=True, num_workers=0)
-    early_stopping = EarlyStopping(patience=config['patience'])
-    scaler = GradScaler()
-    
-    # Print trial start information
-    print(f"Trial {trial.number}: Starting training with hidden_size={hidden_size}, dropout_rate={dropout_rate:.2f}, learning_rate={learning_rate:.6f}")
-    
-    for epoch in range(config['epochs']):
-        model.train()
-        total_loss = 0
-        correct = 0
-        for X_batch, y_batch in train_loader:
+def print_epoch_progress(fold, epoch, total_epochs, train_loss, train_acc, val_loss, val_acc):
+    message = (f"Fold {fold}, Epoch {epoch}/{total_epochs} - "
+               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | "
+               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+    print(f"\r{message}", end='', flush=True)
+
+def print_partial_progress(fold, trial_number, epoch, batch_idx, total_batches, partial_train_loss, partial_train_acc):
+    message = (f"Trial {trial_number}, Fold {fold}, Epoch {epoch} - "
+               f"Batch {batch_idx}/{total_batches} | "
+               f"Train Loss: {partial_train_loss:.4f}, Train Acc: {partial_train_acc:.4f}")
+    print(f"\r{message}", end='', flush=True)
+
+def train_fold(model, optimizer, criterion, scaler, train_loader, device, cleanup_interval, fold, trial_number, epoch, total_epochs):
+    model.train()
+    total_loss = 0
+    correct = 0
+    for batch_idx, (X_batch, y_batch) in enumerate(train_loader, 1):
+        X_batch = X_batch.to(device, non_blocking=True)
+        y_batch = y_batch.to(device, non_blocking=True)
+        optimizer.zero_grad()
+        with autocast():
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        total_loss += loss.item() * X_batch.size(0)
+        _, preds = torch.max(outputs, 1)
+        correct += torch.sum(preds == y_batch)
+        if batch_idx % cleanup_interval == 0:
+            partial_train_loss = total_loss / (batch_idx * train_loader.batch_size)
+            partial_train_acc = correct.double() / (batch_idx * train_loader.batch_size)
+            print_partial_progress(fold, trial_number, epoch, batch_idx, len(train_loader), partial_train_loss, partial_train_acc)
+            del X_batch, y_batch, outputs, preds
+            gc.collect()
+            torch.cuda.empty_cache()
+    train_loss = total_loss / len(train_loader.dataset)
+    train_acc = correct.double() / len(train_loader.dataset)
+    return train_loss, train_acc
+
+def validate_fold(model, criterion, scaler, val_loader, device):
+    model.eval()
+    total_val_loss = 0
+    correct_val = 0
+    with torch.no_grad():
+        for X_batch, y_batch in val_loader:
             X_batch = X_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
-            optimizer.zero_grad()
             with autocast():
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            total_loss += loss.item() * X_batch.size(0)
+            total_val_loss += loss.item() * X_batch.size(0)
             _, preds = torch.max(outputs, 1)
-            correct += torch.sum(preds == y_batch)
-        
-        train_loss = total_loss / len(train_loader.dataset)
-        train_acc = correct.double() / len(train_loader.dataset)
-        
-        model.eval()
-        total_val_loss = 0
-        correct_val = 0
-        with torch.no_grad():
-            for X_batch, y_batch in val_loader:
-                X_batch = X_batch.to(device, non_blocking=True)
-                y_batch = y_batch.to(device, non_blocking=True)
-                with autocast():
-                    outputs = model(X_batch)
-                    loss = criterion(outputs, y_batch)
-                total_val_loss += loss.item() * X_batch.size(0)
-                _, preds = torch.max(outputs, 1)
-                correct_val += torch.sum(preds == y_batch)
-        
-        val_loss = total_val_loss / len(val_loader.dataset)
-        val_acc = correct_val.double() / len(val_loader.dataset)
-        
-        # Print epoch progress on the same line
-        print(f"\rTrial {trial.number}, Epoch {epoch+1}/{config['epochs']} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}", end='', flush=True)
-        
-        early_stopping(val_loss)
-        if early_stopping.early_stop:
-            print(f"\nTrial {trial.number}: Early stopping at epoch {epoch+1}")
-            break
-    
-    # Ensure the final epoch metrics are printed on a new line
-    if not early_stopping.early_stop:
-        print()
-    
-    # Clean up to free GPU memory
-    del model
-    gc.collect()
+            correct_val += torch.sum(preds == y_batch)
+    val_loss = total_val_loss / len(val_loader.dataset)
+    val_acc = correct_val.double() / len(val_loader.dataset)
+    return val_loss, val_acc
+
+def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
+    hidden_size = trial.suggest_int('hidden_size', 50, 150, step=25)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.5)
+    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128, 256])
+    skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+    val_accuracies = []
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+        try:
+            model = RNNModel(model_type, X_train.shape[2], hidden_size, dropout_rate, num_classes).to(device)
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+            train_dataset = TensorDataset(X_train, y_train)
+            val_dataset = TensorDataset(X_val, y_val)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=0)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=0)
+            early_stopping = EarlyStopping(patience=config['patience'])
+            scaler = GradScaler()
+            cleanup_interval = max(1, len(train_loader) // 10)
+            for epoch in range(1, config['epochs'] + 1):
+                train_loss, train_acc = train_fold(
+                    model, optimizer, criterion, scaler, train_loader, device,
+                    cleanup_interval, fold, trial.number, epoch, config['epochs']
+                )
+                val_loss, val_acc = validate_fold(model, criterion, scaler, val_loader, device)
+                print_epoch_progress(fold, epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
+                early_stopping(val_loss)
+                if early_stopping.early_stop:
+                    print(f"Trial {trial.number}, Fold {fold}: Early stopping at epoch {epoch}")
+                    break
+            print()
+            val_accuracies.append(val_acc.item())
+            del model, optimizer, criterion, train_loader, val_loader, train_dataset, val_dataset, scaler
+            gc.collect()
+            torch.cuda.empty_cache()
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                logging.warning(f"Trial {trial.number}, Fold {fold}: OOM encountered. Pruning trial.")
+                torch.cuda.empty_cache()
+                raise optuna.exceptions.TrialPruned()
+            else:
+                raise e
     torch.cuda.empty_cache()
-    
-    return val_acc.item()
+    avg_val_acc = np.mean(val_accuracies)
+    print(f"Trial {trial.number}: Average Validation Accuracy: {avg_val_acc:.4f}")
+    return avg_val_acc
 
 def evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_save_path):
     model.eval()
@@ -240,30 +284,25 @@ def evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_
             correct += torch.sum(preds == y_batch)
     test_loss = total_loss / len(test_loader.dataset)
     test_acc = correct.double() / len(test_loader.dataset)
-    print(f"Test Accuracy: {test_acc:.4f}")
-    print(f"Test Loss: {test_loss:.4f}")
-    
+    logging.info(f"Test Accuracy: {test_acc:.4f}")
+    logging.info(f"Test Loss: {test_loss:.4f}")
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
     torch.save(model.state_dict(), model_save_path)
-    print(f"Model saved to: {model_save_path}")
-    
-    # Save scaler and label encoder for future use
+    logging.info(f"Model saved to: {model_save_path}")
     scaler_path = os.path.splitext(model_save_path)[0] + '_scaler.pkl'
     with open(scaler_path, 'wb') as f:
         pickle.dump(scaler, f)
-    print(f"Scaler saved to: {scaler_path}")
-    
+    logging.info(f"Scaler saved to: {scaler_path}")
     label_encoder_path = os.path.splitext(model_save_path)[0] + '_label_encoder.pkl'
     with open(label_encoder_path, 'wb') as f:
         pickle.dump(label_encoder, f)
-    print(f"Label Encoder saved to: {label_encoder_path}")
+    logging.info(f"Label Encoder saved to: {label_encoder_path}")
 
 def main():
     parser = ArgumentParser()
     parser.add_argument('--model', choices=['lstm', 'gru'], required=True, help='Type of model to use: lstm or gru')
     parser.add_argument('--dataset', default='./data/training/', help='Path to dataset folder containing accel.csv and keys.csv')
     args = parser.parse_args()
-    
     config = load_config(args.model)
     accel_data, keys_data = load_data(args.dataset)
     merged_data = merge_data(
@@ -276,93 +315,63 @@ def main():
     features_df = extract_features_dynamically(merged_data, selected_features)
     X, y, label_encoder, scaler = prepare_data(features_df)
     X_seq, y_seq = create_sequences(X, y, config['sequence_length'])
-    
-    # Ensure y_seq is a NumPy array for stratification
-    X_seq_np = X_seq.numpy()
-    y_seq_np = y_seq.numpy()
-    
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X_seq_np, y_seq_np, test_size=0.3, random_state=42, stratify=y_seq_np
-    )
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
-    )
-    
-    # Convert back to tensors
-    X_train = torch.tensor(X_train, dtype=torch.float32)
-    y_train = torch.tensor(y_train, dtype=torch.long)
-    X_val = torch.tensor(X_val, dtype=torch.float32)
-    y_val = torch.tensor(y_val, dtype=torch.long)
-    X_test = torch.tensor(X_test, dtype=torch.float32)
-    y_test = torch.tensor(y_test, dtype=torch.long)
-    
+    logging.info(f"X_seq shape: {X_seq.shape}")
+    logging.info(f"y_seq shape: {y_seq.shape}")
     num_classes = len(label_encoder.classes_)
-    
-    # Create an Optuna study with MedianPruner for efficient hyperparameter optimization
     study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner())
-    study.optimize(lambda trial: objective(trial, config, X_train, X_val, y_train, y_val, num_classes, args.model), config['max_trials'])
-    
-    print(f"\nBest hyperparameters: {study.best_params}")
-    
+    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, k_folds=5), n_trials=config['max_trials'])
+    logging.info(f"\nBest hyperparameters: {study.best_params}")
     best_trial = study.best_trial
-    
-    # Combine training and validation sets for final training
-    X_final_train = torch.cat((X_train, X_val), dim=0).to(device, non_blocking=True)
-    y_final_train = torch.cat((y_train, y_val), dim=0).to(device, non_blocking=True)
-    
+    X_train_full, X_test, y_train_full, y_test = train_test_split(
+        X_seq, y_seq, test_size=0.15, random_state=42, stratify=y_seq
+    )
+    logging.info(f"X_train_full shape: {X_train_full.shape}")
+    logging.info(f"X_test shape: {X_test.shape}")
+    X_train_full = X_train_full.to(device, non_blocking=True)
+    y_train_full = y_train_full.to(device, non_blocking=True)
     model = RNNModel(
         args.model,
-        X_final_train.shape[1],  # sequence_length
+        X_train_full.shape[2],
         best_trial.params['hidden_size'],
         best_trial.params['dropout_rate'],
         num_classes
     ).to(device)
-    
+    logging.info(f"Model input_size: {X_train_full.shape[2]}")
+    logging.info(f"Sequence length: {X_train_full.shape[1]}")
+    logging.info(f"Number of features: {X_train_full.shape[2]}")
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=best_trial.params['learning_rate'])
-    train_dataset = TensorDataset(X_final_train, y_final_train)
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, pin_memory=True, num_workers=0)
+    train_dataset = TensorDataset(X_train_full, y_train_full)
+    train_loader = DataLoader(train_dataset, batch_size=best_trial.params['batch_size'], shuffle=True, pin_memory=True, num_workers=0)
     scaler_final = GradScaler()
     early_stopping_final = EarlyStopping(patience=config['patience'])
-    
-    print("Starting final training on combined training and validation sets...")
-    
-    for epoch in range(config['epochs']):
-        model.train()
-        total_loss = 0
-        correct = 0
-        for X_batch, y_batch in train_loader:
-            X_batch = X_batch.to(device, non_blocking=True)
-            y_batch = y_batch.to(device, non_blocking=True)
-            optimizer.zero_grad()
-            with autocast():
-                outputs = model(X_batch)
-                loss = criterion(outputs, y_batch)
-            scaler_final.scale(loss).backward()
-            scaler_final.step(optimizer)
-            scaler_final.update()
-            total_loss += loss.item() * X_batch.size(0)
-            _, preds = torch.max(outputs, 1)
-            correct += torch.sum(preds == y_batch)
-        train_loss = total_loss / len(train_loader.dataset)
-        train_acc = correct.double() / len(train_loader.dataset)
-        # Print epoch progress on the same line
-        print(f"\rFinal Training Epoch {epoch+1}/{config['epochs']} - Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}", end='', flush=True)
-        
-        # Optional: Implement early stopping if desired
-        # early_stopping_final(train_loss)
-        # if early_stopping_final.early_stop:
-        #     print(f"\nFinal Training: Early stopping triggered at epoch {epoch+1}")
-        #     break
-    
-    # Ensure the final epoch metrics are printed on a new line
+    logging.info("Starting final training on combined training and validation sets...")
+    cleanup_interval = max(1, len(train_loader) // 10)
+    for epoch in range(1, config['epochs'] + 1):
+        start_time = time.time()
+        train_loss, train_acc = train_fold(
+            model, optimizer, criterion, scaler_final, train_loader, device,
+            cleanup_interval, fold='Final', trial_number=study.best_trial.number, epoch=epoch, total_epochs=config['epochs']
+        )
+        val_loss, val_acc = validate_fold(model, criterion, scaler_final, train_loader, device)
+        print_epoch_progress('Final', epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
+        end_time = time.time()
+        epoch_time = end_time - start_time
+        early_stopping_final(val_loss)
+        if early_stopping_final.early_stop:
+            logging.info(f"Final Training: Early stopping triggered at epoch {epoch}")
+            break
     print()
-    
-    # Evaluate on test set
-    evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_save_path='./data/model/deep_learning/' + args.model + '.pt')
+    evaluate_and_save_model(
+        model, X_test, y_test, label_encoder, scaler,
+        model_save_path=os.path.join('./data/model/deep_learning/', f'{args.model}.pt')
+    )
+    del model, optimizer, criterion, train_loader, train_dataset, scaler_final
+    gc.collect()
+    torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda")
     selected_features = [
         "rms", "rmse", "x_min", "x_max", "y_min", "y_max",
         "z_min", "z_max", "magnitude_min", "magnitude_max", "sma",
