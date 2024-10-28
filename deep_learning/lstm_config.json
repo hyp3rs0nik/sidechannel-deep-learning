@@ -1,5 +1,5 @@
 {
-  "max_trials": 100,
+  "max_trials": 50,
   "epochs": 50,
   "patience": 10,
   "merge_tolerance": "100ms",

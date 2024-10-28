@@ -71,19 +71,15 @@ def prepare_data():
     print(f"Data Preparation Time: {time.time() - start_time:.2f} seconds")
     return features, labels
 
-# Prepare data once, outside of the objective function
 X, y = prepare_data()
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-# Define the objective function for Optuna
 def objective(trial):
-    # Suggest hyperparameters
     n_estimators = trial.suggest_int('n_estimators', 50, 200)
     max_depth = trial.suggest_int('max_depth', 5, 30)
     min_samples_split = trial.suggest_int('min_samples_split', 2, 10)
     min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 5)
     
-    # Initialize the model with suggested hyperparameters
     rfc = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
@@ -92,41 +88,34 @@ def objective(trial):
         random_state=42
     )
     
-    # Use Stratified Cross-Validation
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     scores = cross_val_score(rfc, X_train, y_train, cv=skf, scoring='accuracy')
     return scores.mean()
 
-# Run the optimization
 study = optuna.create_study(direction='maximize')
 study.optimize(objective, n_trials=50, n_jobs=-1)
 
-# Best parameters from the study
 print("Best Parameters:", study.best_params)
 print("Best Cross-Validation Accuracy:", study.best_value)
 
-# Train the model with the best parameters
 best_rfc = RandomForestClassifier(**study.best_params, random_state=42)
 best_rfc.fit(X_train, y_train)
 
-# Save the tuned model
 model_path = './data/models/machine_learning/rfc.pkl'
 os.makedirs(os.path.dirname(model_path), exist_ok=True)
 joblib.dump(best_rfc, model_path, compress=9)
 
-# Check the file size and prompt if it exceeds 100MB
-file_size_mb = os.path.getsize(model_path) / (1024 * 1024)  # Convert to MB
+file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
 if file_size_mb > 100:
     response = input(f"The model file size is {file_size_mb:.2f} MB, which exceeds 100MB. Do you still want to save it? (y/n): ")
     if response.lower() != 'y':
-        os.remove(model_path)  # Delete the file if user chooses 'n'
+        os.remove(model_path) 
         print("Model file deleted due to size constraints.")
     else:
         print(f"Model saved to {model_path} with size {file_size_mb:.2f} MB.")
 else:
     print(f"Model saved to {model_path} with size {file_size_mb:.2f} MB.")
 
-# Evaluate the model
 y_pred = best_rfc.predict(X_test)
 print(f"Optuna-Tuned RFC Accuracy: {accuracy_score(y_test, y_pred)}")
 print(classification_report(y_test, y_pred))
