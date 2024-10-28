@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import optuna
-from scipy.fft import rfft, irfft
 import gc
 import pickle
 from torch.cuda.amp import autocast, GradScaler
@@ -46,27 +45,19 @@ def load_config(model_type):
         sys.exit(1)
     with open(absolute_config_path, 'r') as file:
         config = json.load(file)
-    if 'max_trials' not in config:
-        config['max_trials'] = 50
-        print("'max_trials' not found in config. Using default value of 50.")
-    if 'sequence_length' not in config:
-        config['sequence_length'] = 30
-        print("'sequence_length' not found in config. Using default value of 30.")
-    if 'learning_rate_scheduler' not in config:
-        config['learning_rate_scheduler'] = {
-            "type": "ReduceLROnPlateau",
-            "mode": "min",
-            "factor": 0.5,
-            "patience": 5,
-            "verbose": True
-        }
-        print("'learning_rate_scheduler' not found in config. Using default ReduceLROnPlateau settings.")
-    if 'gradient_clipping' not in config:
-        config['gradient_clipping'] = 1.0
-        print("'gradient_clipping' not found in config. Using default value of 1.0.")
-    if 'mixed_precision' not in config:
-        config['mixed_precision'] = True
-        print("'mixed_precision' not found in config. Enabling mixed precision by default.")
+    config.setdefault('max_trials', 50)
+    config.setdefault('sequence_length', 30)
+    config.setdefault('learning_rate_scheduler', {
+        "type": "ReduceLROnPlateau",
+        "mode": "min",
+        "factor": 0.5,
+        "patience": 5,
+        "verbose": True
+    })
+    config.setdefault('gradient_clipping', 1.0)
+    config.setdefault('mixed_precision', True)
+    config.setdefault('epochs', 50)
+    config.setdefault('patience', 10)
     return config
 
 def load_data(dataset_dir):
@@ -86,11 +77,12 @@ def load_data(dataset_dir):
     keys_data = keys_data.sort_values(by='timestamp').reset_index(drop=True)
     return accel_data, keys_data
 
-def apply_fft_denoise(data, cutoff=0.1, sampling_rate=100):
-    data_fft = rfft(data)
+def apply_fft_denoise_cpu(data, cutoff=0.1, sampling_rate=100):
+    data_fft = np.fft.rfft(data)
     frequencies = np.fft.rfftfreq(len(data), d=1./sampling_rate)
     data_fft[np.abs(frequencies) > cutoff] = 0
-    return irfft(data_fft, n=len(data))
+    denoised = np.fft.irfft(data_fft, n=len(data))
+    return denoised
 
 def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, selected_features=None):
     if selected_features is None:
@@ -104,7 +96,8 @@ def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, sele
     ).dropna(subset=["key"]).reset_index(drop=True)
     for axis in ['x', 'y', 'z']:
         denoised_col = f'{axis}_denoised'
-        merged_data[denoised_col] = apply_fft_denoise(merged_data[axis].values, cutoff=0.1, sampling_rate=sampling_rate)
+        denoised = apply_fft_denoise_cpu(merged_data[axis].values, cutoff=0.1, sampling_rate=sampling_rate)
+        merged_data[denoised_col] = denoised
     for axis in ['x', 'y', 'z']:
         merged_data[axis] = merged_data[f'{axis}_denoised']
     for feature in selected_features:
@@ -123,53 +116,43 @@ def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, sele
         sys.exit(1)
     return merged_data
 
-def extract_features_dynamically(data, selected_features):
+def extract_features_dynamically_cpu(data, selected_features):
     if not selected_features:
         print("No features selected for extraction.")
         sys.exit(1)
-    feature_data = {feature: data[feature] for feature in selected_features}
-    features_df = pd.DataFrame(feature_data)
+    features_df = data[selected_features].copy()
     features_df["key"] = data["key"].values
     return features_df.dropna().reset_index(drop=True)
 
-def prepare_data(merged_data):
-    X = merged_data[selected_features].values
-    y = merged_data["key"].values
+def prepare_data_cpu(features_df, selected_features, device):
+    X = features_df[selected_features].values
+    y = features_df["key"].values
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    if np.isnan(X_scaled).any():
-        print("NaN values found in features.")
-        sys.exit(1)
-    if np.isinf(X_scaled).any():
-        print("Infinite values found in features.")
-        sys.exit(1)
     X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
     y_tensor = torch.tensor(y_encoded, dtype=torch.long)
     return X_tensor, y_tensor, label_encoder, scaler
 
-def create_sequences(X, y, sequence_length):
-    sequences = []
-    labels = []
-    for i in range(len(X) - sequence_length):
-        sequences.append(X[i:i + sequence_length])
-        labels.append(y[i + sequence_length])
-    return torch.stack(sequences), torch.tensor(labels)
+def create_sequences_cpu(X, y, sequence_length):
+    sequences = X.unfold(0, sequence_length, 1)[:-1]
+    labels = y[sequence_length:]
+    return sequences, labels
 
 class RNNModel(nn.Module):
-    def __init__(self, model_type, input_size, hidden_size, dropout_rate, num_classes, num_layers=1):
+    def __init__(self, model_type, input_size, hidden_size, dropout_rate, num_classes, num_layers=2):
         super(RNNModel, self).__init__()
         if model_type == 'lstm':
-            self.rnn = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True)
+            self.rnn = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True)
         elif model_type == 'gru':
-            self.rnn = nn.GRU(input_size, hidden_size, num_layers=num_layers, batch_first=True)
+            self.rnn = nn.GRU(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True)
         else:
             print(f"Unsupported model type: {model_type}")
             sys.exit(1)
         self.dropout = nn.Dropout(dropout_rate)
-        self.fc = nn.Linear(hidden_size, num_classes)
-    
+        self.fc = nn.Linear(hidden_size * 2, num_classes)
+        
     def forward(self, x):
         out, _ = self.rnn(x)
         out = out[:, -1, :]
@@ -191,57 +174,94 @@ class EarlyStopping:
             return
         if score < self.best_score:
             self.counter += 1
-            print(f"EarlyStopping counter: {self.counter} out of {self.patience}")
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
             self.best_score = score
             self.counter = 0
 
-def get_dataloader(dataset, batch_size, shuffle, num_workers=1):
+def get_optimized_dataloader(dataset, batch_size, shuffle, num_workers=0):
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         pin_memory=True,
         num_workers=num_workers,
-        persistent_workers=False
+        persistent_workers=True,
+        prefetch_factor=2,
+        generator=torch.Generator(device='cpu')
     )
 
-def print_progress(trial_number, fold, epoch, total_epochs, train_loss, train_acc, val_loss, val_acc, batch_idx=None, total_batches=None, partial_train_loss=None, partial_train_acc=None):
-    if batch_idx is not None and total_batches is not None and partial_train_loss is not None and partial_train_acc is not None:
-        message = (f"Trial {trial_number}, Fold {fold}, Epoch {epoch} - "
-                   f"Batch {batch_idx}/{total_batches} | "
-                   f"Train Loss: {partial_train_loss:.4f}, Train Acc: {partial_train_acc:.4f}")
-    else:
-        message = (f"Trial {trial_number}, Fold {fold}, Epoch {epoch}/{total_epochs} - "
-                   f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | "
-                   f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-    print(f"\r{message}", end='', flush=True)
+def print_progress(trial_number, fold, epoch, total_epochs, train_loss, train_acc, val_loss, val_acc, 
+                  batch_idx=None, total_batches=None, partial_train_loss=None, partial_train_acc=None, 
+                  max_message_length=[0]):
+    import sys
+    if not hasattr(print_progress, 'last_val_loss'):
+        print_progress.last_val_loss = 0.0
+    if not hasattr(print_progress, 'last_val_acc'):
+        print_progress.last_val_acc = 0.0
 
-def train_fold(model, optimizer, criterion, scaler, train_loader, device, cleanup_interval, fold, trial_number, epoch, total_epochs, gradient_clipping):
+    if batch_idx is not None and total_batches is not None:
+        bar_length = 20
+        fraction = batch_idx / total_batches if total_batches else 0
+        filled_length = int(bar_length * fraction)
+        if filled_length >= bar_length:
+            filled_length = bar_length
+        bar = '\033[1;92m' + '[' + '━' * filled_length + ' ' * (bar_length - filled_length) + ']' + '\033[0m'
+        message = (
+            f"{bar} Trial {trial_number}, Fold {fold}, Epoch {epoch}/{total_epochs} - "
+            f"Train Loss: {partial_train_loss:.3f}, Train Acc: {partial_train_acc:.3f} | "
+            f"Val Loss: {print_progress.last_val_loss:.3f}, Val Acc: {print_progress.last_val_acc:.3f}"
+        )
+        if len(message) > max_message_length[0]:
+            max_message_length[0] = len(message)
+        padded_message = message.ljust(max_message_length[0])
+        sys.stdout.write('\033[2K\r')
+        sys.stdout.write(padded_message)
+        sys.stdout.flush()
+    else:
+        bar = '\033[1;92m' + '[' + '━' * 20 + ']' + '\033[0m'
+        message = (
+            f"{bar} Trial {trial_number}, Fold {fold}, Epoch {epoch}/{total_epochs} - "
+            f"Train Loss: {train_loss:.3f}, Train Acc: {train_acc:.3f} | "
+            f"Val Loss: {val_loss:.3f}, Val Acc: {val_acc:.3f}"
+        )
+        print_progress.last_val_loss = val_loss
+        print_progress.last_val_acc = val_acc
+        if len(message) > max_message_length[0]:
+            max_message_length[0] = len(message)
+        padded_message = message.ljust(max_message_length[0])
+        sys.stdout.write('\033[2K\r')
+        sys.stdout.write(padded_message)
+        sys.stdout.flush()
+
+def train_fold(model, optimizer, criterion, scaler, train_loader, device, cleanup_interval, 
+              fold, trial_number, epoch, total_epochs, gradient_clipping, accumulation_steps=4):
     model.train()
     total_loss = 0
     correct = 0
+    optimizer.zero_grad()
     for batch_idx, (X_batch, y_batch) in enumerate(train_loader, 1):
         X_batch = X_batch.to(device, non_blocking=True)
         y_batch = y_batch.to(device, non_blocking=True)
-        optimizer.zero_grad()
         with autocast():
             outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
+            loss = criterion(outputs, y_batch) / accumulation_steps
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
-        scaler.step(optimizer)
-        scaler.update()
-        total_loss += loss.item() * X_batch.size(0)
+        if batch_idx % accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+        total_loss += loss.item() * accumulation_steps * X_batch.size(0)
         _, preds = torch.max(outputs, 1)
         correct += torch.sum(preds == y_batch)
         if batch_idx % cleanup_interval == 0:
             partial_train_loss = total_loss / (batch_idx * train_loader.batch_size)
             partial_train_acc = correct.double() / (batch_idx * train_loader.batch_size)
-            print_progress(trial_number, fold, epoch, total_epochs, total_loss, correct, None, None, batch_idx, len(train_loader), partial_train_loss, partial_train_acc)
+            print_progress(trial_number, fold, epoch, total_epochs, total_loss, correct, None, None, 
+                          batch_idx, len(train_loader), partial_train_loss, partial_train_acc)
             del X_batch, y_batch, outputs, preds
             gc.collect()
             torch.cuda.empty_cache()
@@ -269,11 +289,11 @@ def validate_fold(model, criterion, scaler, val_loader, device, scheduler=None):
         scheduler.step(val_loss)
     return val_loss, val_acc
 
-def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
-    hidden_size = trial.suggest_int('hidden_size', 50, 150, step=25)
+def objective(trial, config, X, y, num_classes, model_type, k_folds=5, device='cuda'):
+    hidden_size = trial.suggest_int('hidden_size', 100, 300, step=50)
     dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.5)
     learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128, 256])
+    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256, 512])
     epochs = config['epochs']
     patience = config['patience']
     gradient_clipping = config['gradient_clipping']
@@ -281,15 +301,9 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
     mixed_precision = config['mixed_precision']
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
     val_accuracies = []
-
-    if isinstance(X, torch.Tensor):
-        X_cpu = X.cpu().numpy()
-    else:
-        X_cpu = X
-    if isinstance(y, torch.Tensor):
-        y_cpu = y.cpu().numpy()
-    else:
-        y_cpu = y
+    X_cpu = X.cpu().numpy()
+    y_cpu = y.cpu().numpy()
+    step_counter = 0
     for fold, (train_idx, val_idx) in enumerate(skf.split(X_cpu, y_cpu), 1):
         X_train = X[train_idx]
         X_val = X[val_idx]
@@ -298,11 +312,11 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
         model = RNNModel(model_type, X_train.shape[2], hidden_size, dropout_rate, num_classes).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-        scaler = GradScaler(enabled=mixed_precision)
+        scaler_obj = GradScaler(enabled=mixed_precision)
         train_dataset = TensorDataset(X_train, y_train)
         val_dataset = TensorDataset(X_val, y_val)
-        train_loader = get_dataloader(train_dataset, batch_size, shuffle=True, num_workers=mp.cpu_count() // 2)
-        val_loader = get_dataloader(val_dataset, batch_size, shuffle=False, num_workers=mp.cpu_count() // 2)
+        train_loader = get_optimized_dataloader(train_dataset, batch_size, shuffle=True, num_workers=mp.cpu_count())
+        val_loader = get_optimized_dataloader(val_dataset, batch_size, shuffle=False, num_workers=mp.cpu_count())
         early_stopping = EarlyStopping(patience=patience)
         if lr_scheduler_config['type'] == 'ReduceLROnPlateau':
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -317,35 +331,39 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
             sys.exit(1)
         cleanup_interval = max(1, len(train_loader) // 10)
         for epoch in range(1, epochs + 1):
-            train_loss, train_acc = train_fold(
-                model, optimizer, criterion, scaler, train_loader, device,
-                cleanup_interval, fold, trial.number, epoch, epochs, gradient_clipping
-            )
-            val_loss, val_acc = validate_fold(model, criterion, scaler, val_loader, device, scheduler)
-            print_progress(trial.number, fold, epoch, epochs, train_loss, train_acc, val_loss, val_acc)
-            early_stopping(val_loss)
-            if early_stopping.early_stop:
-                print(f"Trial {trial.number}, Fold {fold}: Early stopping at epoch {epoch}")
-                break
-            trial.report(val_acc.item(), epoch)
-            if trial.should_prune():
-                print(f"Trial {trial.number}, Fold {fold}: Pruned at epoch {epoch}")
-                raise optuna.exceptions.TrialPruned()
-        print()
+            try:
+                train_loss, train_acc = train_fold(
+                    model, optimizer, criterion, scaler_obj, train_loader, device,
+                    cleanup_interval, fold, trial.number, epoch, epochs, gradient_clipping,
+                    accumulation_steps=4
+                )
+                val_loss, val_acc = validate_fold(model, criterion, scaler_obj, val_loader, device, scheduler)
+                print_progress(trial.number, fold, epoch, epochs, train_loss, train_acc, val_loss, val_acc)
+                early_stopping(val_loss)
+                if early_stopping.early_stop:
+                    print(f"\nTrial {trial.number}, Fold {fold}: Early stopping at epoch {epoch}")
+                    break
+                step_counter += 1
+                trial.report(val_acc.item(), step_counter)
+                if trial.should_prune():
+                    print(f"\nTrial {trial.number}, Fold {fold}: Pruned at epoch {epoch}")
+                    raise optuna.exceptions.TrialPruned()
+            except Exception as e:
+                print(f"Error during training: {e}")
+                raise e
         val_accuracies.append(val_acc.item())
-        del model, optimizer, criterion, train_loader, val_loader, train_dataset, val_dataset, scaler, scheduler
+        del model, optimizer, criterion, train_loader, val_loader, train_dataset, val_dataset, scaler_obj, scheduler
         gc.collect()
         torch.cuda.empty_cache()
     avg_val_acc = np.mean(val_accuracies)
     print(f"Trial {trial.number}: Average Validation Accuracy: {avg_val_acc:.4f}")
     return avg_val_acc
 
-def evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_save_path, mixed_precision):
+def evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_save_path, mixed_precision, device='cuda'):
     model.eval()
     test_dataset = TensorDataset(X_test, y_test)
-    test_loader = get_dataloader(test_dataset, batch_size=128, shuffle=False, num_workers=mp.cpu_count() // 2)
+    test_loader = get_optimized_dataloader(test_dataset, batch_size=128, shuffle=False, num_workers=mp.cpu_count())
     criterion = nn.CrossEntropyLoss()
-    scaler_eval = GradScaler(enabled=mixed_precision)
     total_loss = 0
     correct = 0
     with torch.no_grad():
@@ -388,14 +406,17 @@ def main():
         sampling_rate=config.get('sampling_rate', 100),
         selected_features=selected_features
     )
-    features_df = extract_features_dynamically(merged_data, selected_features)
-    X, y, label_encoder, scaler = prepare_data(features_df)
-    X_seq, y_seq = create_sequences(X, y, config['sequence_length'])
-    print(f"X_seq shape: {X_seq.shape}")
-    print(f"y_seq shape: {y_seq.shape}")
-    num_classes = len(label_encoder.classes_)
-    study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10))
-    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, k_folds=5), n_trials=config['max_trials'], n_jobs=-1)
+    features_df = extract_features_dynamically_cpu(merged_data, selected_features)
+    X, y, label_encoder, scaler = prepare_data_cpu(features_df, selected_features, device)
+    X_seq, y_seq = create_sequences_cpu(X, y, config['sequence_length'])
+
+    num_classes = len(torch.unique(y_seq))
+    study = optuna.create_study(direction='maximize', 
+                                pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10))
+    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, 
+                                         k_folds=5, device=device), 
+                  n_trials=config['max_trials'], 
+                  n_jobs=1)
     print(f"\nBest hyperparameters: {study.best_params}")
     best_trial = study.best_trial
     X_train_full, X_test, y_train_full, y_test = train_test_split(
@@ -404,7 +425,8 @@ def main():
     print(f"X_train_full shape: {X_train_full.shape}")
     print(f"X_test shape: {X_test.shape}")
     train_dataset = TensorDataset(X_train_full, y_train_full)
-    train_loader = get_dataloader(train_dataset, batch_size=best_trial.params['batch_size'], shuffle=True, num_workers=mp.cpu_count() // 2)
+    train_loader = get_optimized_dataloader(train_dataset, batch_size=best_trial.params['batch_size'], 
+                                          shuffle=True, num_workers=mp.cpu_count()) 
     model = RNNModel(
         args.model,
         X_train_full.shape[2],
@@ -431,25 +453,28 @@ def main():
     print("Starting final training on combined training and validation sets...")
     cleanup_interval = max(1, len(train_loader) // 10)
     for epoch in range(1, config['epochs'] + 1):
-        start_time = time.time()
-        train_loss, train_acc = train_fold(
-            model, optimizer, criterion, scaler_final, train_loader, device,
-            cleanup_interval, fold='Final', trial_number='Final', epoch=epoch, total_epochs=config['epochs'],
-            gradient_clipping=config['gradient_clipping']
-        )
-        val_loss, val_acc = validate_fold(model, criterion, scaler_final, train_loader, device, scheduler)
-        print_progress('Final', 'Final', epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
-        early_stopping_final(val_loss)
-        if early_stopping_final.early_stop:
-            print(f"Final Training: Early stopping triggered at epoch {epoch}")
+        try:
+            train_loss, train_acc = train_fold(
+                model, optimizer, criterion, scaler_final, train_loader, device,
+                cleanup_interval, fold='Final', trial_number='Final', epoch=epoch, 
+                total_epochs=config['epochs'],
+                gradient_clipping=config['gradient_clipping'],
+                accumulation_steps=4
+            )
+            val_loss, val_acc = validate_fold(model, criterion, scaler_final, train_loader, device, scheduler)
+            print_progress('Final', 'Final', epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
+            early_stopping_final(val_loss)
+            if early_stopping_final.early_stop:
+                print(f"\nFinal Training: Early stopping triggered at epoch {epoch}")
+                break
+        except Exception as e:
+            print(f"Error during final training: {e}")
             break
-        end_time = time.time()
-        epoch_time = end_time - start_time
-        print(f"Epoch {epoch} completed in {epoch_time:.2f} seconds.")
     print()
     model_save_path = os.path.join('./data/model/deep_learning/', f'{args.model}.pt')
     evaluate_and_save_model(
-        model, X_test, y_test, label_encoder, scaler, model_save_path, mixed_precision=config['mixed_precision']
+        model, X_test, y_test, label_encoder, scaler, model_save_path, 
+        mixed_precision=config['mixed_precision'], device=device
     )
     del model, optimizer, criterion, train_loader, train_dataset, scaler_final, scheduler
     gc.collect()
