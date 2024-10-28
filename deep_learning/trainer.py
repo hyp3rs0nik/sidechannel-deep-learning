@@ -395,7 +395,7 @@ def main():
     print(f"y_seq shape: {y_seq.shape}")
     num_classes = len(label_encoder.classes_)
     study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10))
-    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, k_folds=5), n_trials=config['max_trials'], n_jobs=2)
+    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, k_folds=5), n_trials=config['max_trials'], n_jobs=-1)
     print(f"\nBest hyperparameters: {study.best_params}")
     best_trial = study.best_trial
     X_train_full, X_test, y_train_full, y_test = train_test_split(
