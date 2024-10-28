@@ -67,7 +67,7 @@ python ./machine_learning/trainer.py
 ```
 **Train the Deep Learning model (LSTM/GRU)**:
 ```bash
-python ./trainer.py --model lstm --dataset ./data/training/
+python ./deep_learning/trainer.py --model lstm --dataset ./data/training/
 ```
 
 ## Limitations
