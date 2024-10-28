@@ -57,6 +57,7 @@ def apply_fft_denoise(data, cutoff=0.1, sampling_rate=100):
 def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, selected_features=None):
     if selected_features is None:
         selected_features = ["x", "y", "z"]
+
     merged_data = pd.merge_asof(
         accel_data.sort_values("timestamp"),
         keys_data.sort_values("timestamp"),
@@ -64,6 +65,7 @@ def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, sele
         direction="nearest",
         tolerance=pd.Timedelta(tolerance)
     ).dropna(subset=["key"])
+
     for axis in ['x', 'y', 'z']:
         denoised_col = f'{axis}_denoised'
         merged_data[denoised_col] = apply_fft_denoise(merged_data[axis].values, cutoff=0.1, sampling_rate=sampling_rate)
@@ -76,6 +78,7 @@ def merge_data(accel_data, keys_data, tolerance='100ms', sampling_rate=100, sele
             else:
                 logging.error(f"Feature '{feature}' not found in feature_functions.")
                 sys.exit(1)
+    
     required_features = selected_features + ["key"]
     missing_features = [feat for feat in required_features if feat not in merged_data.columns]
     if missing_features:
@@ -158,8 +161,8 @@ class EarlyStopping:
             self.best_score = score
             self.counter = 0
 
-def print_epoch_progress(fold, epoch, total_epochs, train_loss, train_acc, val_loss, val_acc):
-    message = (f"Fold {fold}, Epoch {epoch}/{total_epochs} - "
+def print_epoch_progress(trial_no, fold, epoch, total_epochs, train_loss, train_acc, val_loss, val_acc):
+    message = (f"Trial {trial_no}, Fold {fold}, Epoch {epoch}/{total_epochs} - "
                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | "
                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
     print(f"\r{message}", end='', flush=True)
@@ -276,7 +279,7 @@ def objective(trial, config, X, y, num_classes, model_type, k_folds=5):
                     cleanup_interval, fold, trial.number, epoch, config['epochs']
                 )
                 val_loss, val_acc = validate_fold(model, criterion, scaler, val_loader, device)
-                print_epoch_progress(fold, epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
+                print_epoch_progress(trial.number, fold, epoch, config['epochs'], train_loss, train_acc, val_loss, val_acc)
                 early_stopping(val_loss)
                 if early_stopping.early_stop:
                     logging.info(f"Trial {trial.number}, Fold {fold}: Early stopping at epoch {epoch}")
@@ -305,15 +308,14 @@ def evaluate_and_save_model(model, X_test, y_test, label_encoder, scaler, model_
         test_dataset,
         batch_size=128,
         shuffle=False,
-        pin_memory=True,  # Re-enabled pin_memory
-        num_workers=4      # Adjust based on your CPU cores
+        pin_memory=True,
+        num_workers=4 
     )
     criterion = nn.CrossEntropyLoss()
     total_loss = 0
     correct = 0
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
-            # Move data to GPU
             X_batch = X_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
             
@@ -360,7 +362,7 @@ def main():
     logging.info(f"y_seq shape: {y_seq.shape}")
     num_classes = len(label_encoder.classes_)
     study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner())
-    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, k_folds=5), n_trials=config['max_trials'])
+    study.optimize(lambda trial: objective(trial, config, X_seq, y_seq, num_classes, args.model, k_folds=5), n_trials=config['max_trials'], n_jobs=4)
     logging.info(f"\nBest hyperparameters: {study.best_params}")
     best_trial = study.best_trial
     X_train_full, X_test, y_train_full, y_test = train_test_split(
@@ -373,8 +375,8 @@ def main():
         train_dataset,
         batch_size=best_trial.params['batch_size'],
         shuffle=True,
-        pin_memory=True,  # Re-enabled pin_memory
-        num_workers=4      # Adjust based on your CPU cores
+        pin_memory=True,
+        num_workers=4
     )
     scaler_final = GradScaler()
     early_stopping_final = EarlyStopping(patience=config['patience'])
