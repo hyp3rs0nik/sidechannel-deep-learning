@@ -1,8 +1,17 @@
 {
-  "sequence_length": 50,
-  "dropout_rate": 0.3,
-  "learning_rate": 0.001,
-  "batch_size": 64,
+  "max_trials": 50,
   "epochs": 50,
-  "patience": 5
+  "patience": 10,
+  "merge_tolerance": "100ms",
+  "sampling_rate": 100,
+  "sequence_length": 30,
+  "learning_rate_scheduler": {
+      "type": "ReduceLROnPlateau",
+      "mode": "min",
+      "factor": 0.5,
+      "patience": 5,
+      "verbose": true
+  },
+  "gradient_clipping": 1.0,
+  "mixed_precision": true
 }
