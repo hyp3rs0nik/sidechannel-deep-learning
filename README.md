@@ -61,11 +61,11 @@ pip install -r requirements.txt
 ```
 
 ## Usage
-**Train the Machine Learning model: (models are save in `./data/models/machine_learning`)
+**Train the Machine Learning model**:
 ```bash
 python ./machine_learning/trainer.py
 ```
-** Train the Deep Learning model (LSTM/GRU): `./data/models/deep_learning`
+**Train the Deep Learning model (LSTM/GRU)**:
 ```bash
 python ./trainer.py --model lstm --dataset ./data/training/
 ```
