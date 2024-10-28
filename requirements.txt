@@ -4,7 +4,5 @@ scikit-learn
 keras-tuner
 scipy
 pyyaml
-tensorflow[and-cuda]
-tensorrt
+torch
 optuna
-optuna-integration[tfkeras]

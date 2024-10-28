@@ -1,73 +1,86 @@
-
 # ML/DL Numeric Keystroke Inference
 
-This project focuses on inferring numeric keystrokes using data captured from a keylogger and smartwatch sensors. **Machine learning**, specifically a **Random Forest Classifier**, is used to analyze the sensor data, with the goal of identifying specific numeric keystrokes made by the user. The project explores how smartwatch accelerometer data can be used to infer which numeric keys are pressed, providing insights into potential vulnerabilities related to keystroke detection through wearable devices.
+This project focuses on inferring numeric keystrokes using data captured from a keylogger and smartwatch sensors. The solution incorporates **Machine Learning** using a **Random Forest Classifier** and **Deep Learning** models (LSTM/GRU) to analyze accelerometer data. The goal is to identify specific numeric keystrokes made by the user. This project highlights potential vulnerabilities of keystroke detection through wearable devices, showcasing how accelerometer data can infer keystrokes.
+
+---
 
 ## Inference Process
 
-The inference process involves capturing raw data from two sources:
+The inference process involves capturing data from two sources:
 
-1. **Keylogger (capture-key-app)**: Records keypresses on the user’s device and associates them with precise timestamps.
-2. **Smartwatch (capture-sensor-app)**: The smartwatch captures movement data from its accelerometer sensors, which are timestamped and aligned with the captured keypress data.
+1. **Keylogger (capture-key-app)**: Records keypresses on the user’s device with precise timestamps.
+2. **Smartwatch (capture-sensor-app)**: Captures accelerometer data, timestamped and aligned with the keypress data.
 
-### Data Processing and Feature Engineering
+---
 
-Key steps in the process:
-- **Feature Extraction**: Important features such as Root Mean Square (RMS), RMS cross rate, Signal Magnitude Area (SMA), and Euclidean magnitude are derived from the accelerometer data to capture variations related to keystrokes.
-- **Model Training**: The processed data is fed into a **Random Forest Classifier**, which uses hyperparameter tuning via **GridSearchCV** to optimize the model’s performance.
-- **Evaluation**: The model is evaluated using accuracy and F1-score metrics to measure its effectiveness in identifying keypresses.
+## Data Processing and Feature Engineering
 
-### Machine Learning Model
+Key steps in the process include:
 
-The current approach uses a **Random Forest Classifier** with hyperparameter tuning. The trained model is saved in:
-```
-./data/models/machine_learning/{model_name}.pkl
-```
-This allows for easy retrieval and deployment of the model for future predictions.
+- **Data Segmentation**: Refined segmentation logic aligns accelerometer data with keypress events using timestamps.
+- **FFT-Based Denoising**: Applies FFT to filter out high-frequency noise from accelerometer data.
+- **Feature Extraction**: Extracts critical features like RMS, SMA, min/max axis values, and magnitude variations.
+- **Dynamic Feature Selection**: Additional features are selected and applied based on configuration.
 
-### Limitations
+---
 
-This experiment was conducted with a relatively small dataset, which limits its generalizability. Additionally:
-- **Sensor Noise**: Inaccuracies or noise in the accelerometer readings may affect data quality.
-- **Typing Style Variation**: Differences in individual typing styles can introduce variance in sensor readings.
-- **Smartwatch Positioning**: Variations in how the smartwatch is worn can impact accuracy.
+## Machine Learning Model
 
-As a result, **the current model serves as a proof of concept** and may not perform optimally under all conditions or with diverse users.
+The **Random Forest Classifier** is tuned using **Optuna** for hyperparameter optimization. 
+
+- **Model Training**: The segmented and processed data is fed into the classifier for training.
+- **Cross-Validation**: Stratified K-Fold validation is used for reliable model evaluation.
+- **Performance Metrics**: Model performance is measured using accuracy and classification reports.
+
+The model is saved to: `./data/models/machine_learning/rfc.pkl`
+
+
+---
+
+## Deep Learning Model
+
+For advanced analysis, **LSTM/GRU models** are trained using PyTorch, with hyperparameter tuning via Optuna. 
+
+- **Data Preparation**: Tensor-based sequence generation ensures the LSTM/GRU models can capture temporal dependencies.
+- **Training Process**: Mixed precision training and gradient clipping are used for stability.
+- **Early Stopping**: Monitors validation loss to avoid overfitting.
+  
+The deep learning models are saved to: `./data/models/deep_learning/{model_name}.pt`
+
 
 ## Setup and Installation
 
-1. Clone the repository:
-   ```sh
+1. **Clone the repository:**
+   ```bash
    git clone https://github.com/yourusername/sidechannel-keys-sensor-main.git
    cd sidechannel-keys-sensor
    ```
-
-2. Install the necessary Python dependencies:
-   ```sh
-   pip install -r requirements.txt
-   ```
-
-3. Install the necessary dependencies for the API server (assuming Node.js is installed):
-   ```sh
-   cd ./capture-data-api
-   npm install
-   node server/js
-   ```
+2. **Install Python dependencies:**
+```bash
+pip install -r requirements.txt
+```
 
 ## Usage
-
-To train the machine learning model with the processed data:
-```sh
+**Train the Machine Learning model: (models are save in `./data/models/machine_learning`)
+```bash
 python ./machine_learning/trainer.py
 ```
+## Train the Deep Learning model (LSTM/GRU): `./data/models/deep_learning`
+```bash
+python ./trainer.py --model lstm --dataset ./data/training/
+```
 
-After training, the model is automatically saved to:
-```
-./data/models/machine_learning/{model_name}.pkl
-```
+## Limitations
+
+- **Small Dataset**: Results may vary due to limited data.
+- **Sensor Noise**: Noisy sensor data may reduce accuracy.
+- **Typing Style & Watch Positioning**: Individual typing styles and variations in watch placement may affect model performance.
 
 ## Future Work
+- Dataset Expansion: Collect more data for improved generalizability.
+- Algorithm Improvements: Experiment with CNNs or hybrid models.
+- Real-time Prediction: Implement real-time prediction capabilities.
 
-- **Dataset Expansion**: Expand the dataset to improve model robustness and generalizability.
-- **Algorithm Improvements**: Experiment with other machine learning algorithms or deep learning models.
-- **Real-time Prediction**: Implement real-time keypress prediction using the trained model.
+
+
+
