@@ -112,7 +112,7 @@ best_rfc.fit(X_train, y_train)
 # Save the tuned model
 model_path = './data/models/machine_learning/rfc.pkl'
 os.makedirs(os.path.dirname(model_path), exist_ok=True)
-joblib.dump(best_rfc, model_path, compress=8)
+joblib.dump(best_rfc, model_path, compress=9)
 
 # Check the file size and prompt if it exceeds 100MB
 file_size_mb = os.path.getsize(model_path) / (1024 * 1024)  # Convert to MB
