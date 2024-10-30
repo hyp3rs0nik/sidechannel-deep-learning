@@ -104,7 +104,7 @@ def objective(trial):
 
 # Step 4: Hyperparameter Optimization with Optuna
 study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=30, n_jobs=-1)
+study.optimize(objective, n_trials=50, n_jobs=-1)
 
 print("Best Parameters:", study.best_params)
 print("Best Cross-Validation Accuracy:", study.best_value)
