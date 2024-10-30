@@ -80,11 +80,11 @@ X_holdout_scaled = scaler.transform(X_holdout)
 
 # Define the Optuna objective function with cross-validation
 def objective(trial):
-    n_estimators = trial.suggest_int('n_estimators', 50, 200)
-    max_depth = trial.suggest_int('max_depth', 5, 30)
-    min_samples_split = trial.suggest_int('min_samples_split', 2, 10)
-    min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 5)
-    max_features = trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
+    n_estimators = trial.suggest_int('n_estimators', 170, 190)
+    max_depth = trial.suggest_int('max_depth', 20, 30)
+    min_samples_split = trial.suggest_int('min_samples_split', 2, 4)
+    min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 3)
+    max_features = trial.suggest_categorical('max_features', [None])
     
     rfc = RandomForestClassifier(
         n_estimators=n_estimators,
@@ -104,7 +104,7 @@ def objective(trial):
 
 # Step 4: Hyperparameter Optimization with Optuna
 study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=50, n_jobs=-1)
+study.optimize(objective, n_trials=30, n_jobs=-1)
 
 print("Best Parameters:", study.best_params)
 print("Best Cross-Validation Accuracy:", study.best_value)
@@ -116,6 +116,16 @@ best_rfc.fit(X_train_scaled, y_train)
 # Step 6: Evaluate on the Holdout Set
 y_holdout_pred = best_rfc.predict(X_holdout_scaled)
 holdout_accuracy = accuracy_score(y_holdout, y_holdout_pred)
+
+holdout_data = pd.DataFrame(X_holdout_scaled, columns=[f'feature_{i}' for i in range(X_holdout_scaled.shape[1])])
+holdout_data['true_label'] = y_holdout
+holdout_data['predicted_label'] = y_holdout_pred
+
+# Save to CSV for visualization purposes
+holdout_data.to_csv('./data/training/holdout_data.csv', index=False)
+
+print("Holdout data and predictions saved to './data/training/holdout_data.csv'")
+
 print(f"Holdout Set Accuracy: {holdout_accuracy:.4f}")
 print("Holdout Set Classification Report:")
 print(classification_report(label_encoder.inverse_transform(y_holdout), label_encoder.inverse_transform(y_holdout_pred)))
