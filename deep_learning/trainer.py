@@ -54,7 +54,7 @@ def set_seed(seed=42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True  # Enabled CUDNN Benchmarking for optimized backend operations
+    torch.backends.cudnn.benchmark = True 
 
 set_seed()
 
@@ -66,7 +66,7 @@ def load_config():
         sys.exit(1)
     with open(absolute_config_path, "r") as file:
         config = json.load(file)
-    # Set default values if not present
+
     config.setdefault("max_trials", 50)
     config.setdefault("sequence_length", 30)
     config.setdefault(
@@ -85,11 +85,12 @@ def load_config():
     config.setdefault("patience", 10)
     config.setdefault("merge_tolerance", "100ms")
     config.setdefault("sampling_rate", 100)
-    config.setdefault("batch_size", [32, 64, 128, 256, 512, 1024, 2048, 4096])  # Updated
-    config.setdefault("learning_rate", [0.006, 0.004, 0.002, 0.001, 0.0005, 0.00025, 0.000125, 0.0000625])  # Updated
+    config.setdefault("batch_size", [32, 64, 128, 256, 512, 1024, 2048, 4096])
+    config.setdefault("learning_rate", [0.006, 0.004, 0.002, 0.001, 0.0005, 0.00025, 0.000125, 0.0000625])
     config.setdefault("num_workers", 4)  
     config.setdefault("ulimit_n", 4096)
-    config.setdefault("n_folds", 5)  # New
+    config.setdefault("n_folds", 5)
+    config.setdefault("denoise", False)
     return config
 
 def load_data(dataset_dir):
@@ -117,7 +118,7 @@ def apply_fft_denoise_cpu(data, cutoff=0.1, sampling_rate=100):
     return denoised
 
 def merge_data(
-    accel_data, keys_data, tolerance="100ms", sampling_rate=100, selected_features=None
+    accel_data, keys_data, tolerance="100ms", sampling_rate=100, selected_features=None, denoise=False 
 ):
     if selected_features is None:
         selected_features = ["x", "y", "z"]
@@ -132,14 +133,15 @@ def merge_data(
         .dropna(subset=["key"])
         .reset_index(drop=True)
     )
-    for axis in ["x", "y", "z"]:
-        denoised_col = f"{axis}_denoised"
-        denoised = apply_fft_denoise_cpu(
-            merged_data[axis].values, cutoff=0.1, sampling_rate=sampling_rate
-        )
-        merged_data[denoised_col] = denoised
-    for axis in ["x", "y", "z"]:
-        merged_data[axis] = merged_data[f"{axis}_denoised"]
+    if denoise:
+        for axis in ["x", "y", "z"]:
+            denoised_col = f"{axis}_denoised"
+            denoised = apply_fft_denoise_cpu(
+                merged_data[axis].values, cutoff=0.1, sampling_rate=sampling_rate
+            )
+            merged_data[denoised_col] = denoised
+        for axis in ["x", "y", "z"]:
+            merged_data[axis] = merged_data[f"{axis}_denoised"]
     for feature in selected_features:
         if feature in ["x", "y", "z"]:
             continue
@@ -255,14 +257,12 @@ def print_epoch_report(
     show_insights=False,
     timing_info=None,
 ):
-    # Construct the epoch report message
     message = (
         f"Trial {trial_number}/{max_trials}, Fold {fold}, Epoch {epoch}/{total_epochs} - "
         f"Train Loss: {train_loss:.3f}, Train Acc: {train_acc:.3f} | "
         f"Val Loss: {val_loss:.3f}, Val Acc: {val_acc:.3f}"
     )
     print(message.ljust(120), end="\r", flush=True)
-    # If insights are enabled, print timing information on a separate line
     if show_insights and timing_info:
         timing_message = " | ".join([f"{k}: {v:.2f} ms" for k, v in timing_info.items()])
         print(f"Insights: {timing_message}")
@@ -281,15 +281,14 @@ def train_fold(
     total_epochs,
     gradient_clipping,
     accumulation_steps=4,
-    use_progress_bar=True,  # Not used anymore
-    show_insights=False,     # New parameter
+    use_progress_bar=True,
+    show_insights=False, 
 ):
     model.train()
     total_loss = 0
     correct = 0
     optimizer.zero_grad()
 
-    # Initialize timing variables
     forward_time = 0
     backward_time = 0
     optimization_time = 0
@@ -298,7 +297,6 @@ def train_fold(
         X_batch = X_batch.to(device, non_blocking=True)
         y_batch = y_batch.to(device, non_blocking=True)
 
-        # Forward pass timing
         start_forward = time.perf_counter()
         with autocast():
             outputs = model(X_batch)
@@ -306,13 +304,11 @@ def train_fold(
         end_forward = time.perf_counter()
         forward_time += (end_forward - start_forward)
 
-        # Backward pass timing
         start_backward = time.perf_counter()
         scaler.scale(loss).backward()
         end_backward = time.perf_counter()
         backward_time += (end_backward - start_backward)
 
-        # Optimization step timing
         if batch_idx % accumulation_steps == 0:
             start_opt = time.perf_counter()
             scaler.unscale_(optimizer)
@@ -330,11 +326,10 @@ def train_fold(
     train_loss = total_loss / len(train_loader.dataset)
     train_acc = correct.double() / len(train_loader.dataset)
 
-    # Collect timing information
     timing_info = {}
     if show_insights:
         timing_info = {
-            "Forward Pass": forward_time * 1000,         # Convert to ms
+            "Forward Pass": forward_time * 1000, 
             "Backward Pass": backward_time * 1000,
             "Optimization Step": optimization_time * 1000,
         }
@@ -346,7 +341,6 @@ def validate_fold(model, criterion, scaler, val_loader, device, scheduler=None, 
     total_val_loss = 0
     correct_val = 0
 
-    # Initialize timing variables
     forward_time = 0
 
     with torch.no_grad():
@@ -354,7 +348,6 @@ def validate_fold(model, criterion, scaler, val_loader, device, scheduler=None, 
             X_batch = X_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
 
-            # Forward pass timing
             start_forward = time.perf_counter()
             with autocast():
                 outputs = model(X_batch)
@@ -371,21 +364,20 @@ def validate_fold(model, criterion, scaler, val_loader, device, scheduler=None, 
     if scheduler is not None:
         scheduler.step(val_loss)
 
-    # Collect timing information
     timing_info = {}
     if show_insights:
         timing_info = {
-            "Validation Forward Pass": forward_time * 1000,  # Convert to ms
+            "Validation Forward Pass": forward_time * 1000,
         }
 
     return val_loss, val_acc, timing_info
 
 def objective(trial, config, X, y, num_classes, k_folds=5, device="cuda", use_progress_bar=True, show_insights=False):
-    # Suggest batch size and learning rate
+
     batch_size = trial.suggest_categorical("batch_size", config["batch_size"])
     learning_rate = trial.suggest_categorical("learning_rate", config["learning_rate"])
 
-    # Log the selected hyperparameters
+  
     print(f"Selected Batch Size: {batch_size}, Learning Rate: {learning_rate}")
 
     epochs = config["epochs"]
@@ -393,7 +385,7 @@ def objective(trial, config, X, y, num_classes, k_folds=5, device="cuda", use_pr
     gradient_clipping = config["gradient_clipping"]
     lr_scheduler_config = config["learning_rate_scheduler"]
     mixed_precision = config["mixed_precision"]
-    skf = StratifiedKFold(n_splits=config["n_folds"], shuffle=True, random_state=42)  # Updated
+    skf = StratifiedKFold(n_splits=config["n_folds"], shuffle=True, random_state=42)
     val_accuracies = []
     X_cpu = X.cpu().numpy()
     y_cpu = y.cpu().numpy()
@@ -405,7 +397,7 @@ def objective(trial, config, X, y, num_classes, k_folds=5, device="cuda", use_pr
         y_train = y[train_idx]
         y_val = y[val_idx]
         model = RNNModel(
-            X_train.shape[2],  # input_size
+            X_train.shape[2], 
             hidden_size=trial.suggest_int("hidden_size", 100, 300, step=50),
             dropout_rate=trial.suggest_float("dropout_rate", 0.2, 0.5),
             num_classes=num_classes,
@@ -437,7 +429,7 @@ def objective(trial, config, X, y, num_classes, k_folds=5, device="cuda", use_pr
             sys.exit(1)
         cleanup_interval = max(1, len(train_loader) // 10)
         for epoch in range(1, epochs + 1):
-            epoch_start_time = time.perf_counter()  # Start time
+            epoch_start_time = time.perf_counter() 
             try:
                 train_loss, train_acc, train_timing = train_fold(
                     model,
@@ -459,10 +451,9 @@ def objective(trial, config, X, y, num_classes, k_folds=5, device="cuda", use_pr
                 val_loss, val_acc, val_timing = validate_fold(
                     model, criterion, scaler_obj, val_loader, device, scheduler, use_progress_bar=use_progress_bar, show_insights=show_insights
                 )
-                epoch_end_time = time.perf_counter()  # End time
-                epoch_duration_ms = (epoch_end_time - epoch_start_time) * 1000  # Convert to ms
+                epoch_end_time = time.perf_counter() 
+                epoch_duration_ms = (epoch_end_time - epoch_start_time) * 1000 
 
-                # Aggregate timing information if insights are enabled
                 if show_insights:
                     combined_timing = {
                         "Epoch Time": epoch_duration_ms
@@ -477,7 +468,7 @@ def objective(trial, config, X, y, num_classes, k_folds=5, device="cuda", use_pr
                     fold,
                     epoch,
                     epochs,
-                    config["max_trials"],  # Added
+                    config["max_trials"],
                     train_loss,
                     train_acc,
                     val_loss,
@@ -566,7 +557,6 @@ def evaluate_and_save_model(
         pickle.dump(label_encoder, f)
     print(f"Label Encoder saved to: {label_encoder_path}")
 
-# Checkpointing Helper Functions
 def save_checkpoint(state, checkpoint_dir, filename):
     os.makedirs(checkpoint_dir, exist_ok=True)
     filepath = os.path.join(checkpoint_dir, filename)
@@ -584,7 +574,7 @@ def load_checkpoint(checkpoint_dir, filename, device):
 
 def main():
     parser = ArgumentParser()
-    # Existing arguments...
+
     parser.add_argument(
         "--dataset",
         default="./data/training/",
@@ -603,13 +593,12 @@ def main():
     )
     args = parser.parse_args()
     report_mode = args.report
-    use_progress_bar = False  # Ditch the progress bar as per request
-    show_insights = args.insights  # Boolean flag
+    use_progress_bar = False 
+    show_insights = args.insights 
 
     config = load_config()
 
-    # Set ulimit here before DataLoaders are created
-    set_ulimit(config.get("ulimit_n", 4096))  # Set ulimit from config or default to 4096
+    set_ulimit(config.get("ulimit_n", 4096)) 
 
     accel_data, keys_data = load_data(args.dataset)
     merged_data = merge_data(
@@ -618,6 +607,7 @@ def main():
         tolerance=config.get("merge_tolerance", "100ms"),
         sampling_rate=config.get("sampling_rate", 100),
         selected_features=selected_features,
+        denoise=config.get("denoise", False) 
     )
     features_df = extract_features_dynamically_cpu(merged_data, selected_features)
     X, y, label_encoder, scaler = prepare_data_cpu(
@@ -627,11 +617,9 @@ def main():
 
     num_classes = len(torch.unique(y_seq))
 
-    # Define the storage path for the Optuna study
     storage_path = os.path.join("./data/optuna_studies/", "lstm_optuna_study.db")
     os.makedirs(os.path.dirname(storage_path), exist_ok=True)
 
-    # Create or load the Optuna study with persistent storage
     study = optuna.create_study(
         direction="maximize",
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10),
@@ -640,7 +628,7 @@ def main():
         load_if_exists=True
     )
 
-    # Optimize the study
+
     study.optimize(
         lambda trial: objective(
             trial,
@@ -648,19 +636,18 @@ def main():
             X_seq,
             y_seq,
             num_classes,
-            k_folds=config["n_folds"],  # Configurable
+            k_folds=config["n_folds"],
             device=device,
             use_progress_bar=use_progress_bar,
-            show_insights=show_insights,  # Passed here
+            show_insights=show_insights,
         ),
         n_trials=config["max_trials"],
-        n_jobs=1,  # Adjusted to 1 for better compatibility with SQLite
+        n_jobs=1,
     )
 
     print(f"\nBest hyperparameters: {study.best_params}")
     best_trial = study.best_trial
 
-    # Extract the best batch size and learning rate
     batch_size = best_trial.params["batch_size"]
     learning_rate = best_trial.params["learning_rate"]
 
@@ -674,12 +661,12 @@ def main():
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=config["num_workers"],  # Use configurable num_workers
+        num_workers=config["num_workers"], 
     )
     model = RNNModel(
         X_train_full.shape[2],
-        hidden_size=best_trial.params["hidden_size"],
-        dropout_rate=best_trial.params["dropout_rate"],
+        hidden_size=best_trial.params.get("hidden_size", 150), 
+        dropout_rate=best_trial.params.get("dropout_rate", 0.3),
         num_classes=num_classes,
         num_layers=2,
         bidirectional=True,
@@ -688,11 +675,10 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scaler_final = GradScaler(enabled=config["mixed_precision"])
 
-    # Define checkpoint directory and file
+
     checkpoint_dir = "./checkpoints/final_training/"
     checkpoint_filename = "final_training_checkpoint.pth"
 
-    # Attempt to load existing checkpoint
     checkpoint = load_checkpoint(checkpoint_dir, checkpoint_filename, device)
     start_epoch = 1
 
@@ -729,7 +715,7 @@ def main():
     print("Starting final training on combined training and validation sets...")
     cleanup_interval = max(1, len(train_loader) // 10)
     for epoch in range(start_epoch, config["epochs"] + 1):
-        epoch_start_time = time.perf_counter()  # Start time
+        epoch_start_time = time.perf_counter() 
         try:
             train_loss, train_acc, train_timing = train_fold(
                 model,
@@ -745,16 +731,15 @@ def main():
                 total_epochs=config["epochs"],
                 gradient_clipping=config["gradient_clipping"],
                 accumulation_steps=4,
-                use_progress_bar=use_progress_bar,  # Not used
+                use_progress_bar=use_progress_bar,
                 show_insights=show_insights,
             )
             val_loss, val_acc, val_timing = validate_fold(
                 model, criterion, scaler_final, train_loader, device, scheduler, use_progress_bar=use_progress_bar, show_insights=show_insights
             )
-            epoch_end_time = time.perf_counter()  # End time
-            epoch_duration_ms = (epoch_end_time - epoch_start_time) * 1000  # Convert to ms
+            epoch_end_time = time.perf_counter() 
+            epoch_duration_ms = (epoch_end_time - epoch_start_time) * 1000
 
-            # Aggregate timing information if insights are enabled
             if show_insights:
                 combined_timing = {
                     "Epoch Time": epoch_duration_ms
@@ -769,7 +754,7 @@ def main():
                 "Final",
                 epoch,
                 config["epochs"],
-                config["max_trials"],  # Added
+                config["max_trials"], 
                 train_loss,
                 train_acc,
                 val_loss,
@@ -782,7 +767,6 @@ def main():
                 print(f"\nFinal Training: Early stopping triggered at epoch {epoch}")
                 break
 
-            # Save checkpoint after each epoch
             checkpoint_state = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -795,7 +779,7 @@ def main():
 
         except Exception as e:
             print(f"Error during final training: {e}")
-            # Cleanup resources
+ 
             del model, optimizer, criterion, train_loader, val_loader, train_dataset, val_dataset, scaler_final, scheduler
             gc.collect()
             torch.cuda.empty_cache()
@@ -803,7 +787,6 @@ def main():
 
     print()
 
-    # Optionally, delete the checkpoint upon successful completion
     if not early_stopping_final.early_stop:
         checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
         if os.path.exists(checkpoint_path):

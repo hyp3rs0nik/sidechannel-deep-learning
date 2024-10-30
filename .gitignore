@@ -8,6 +8,7 @@ process/~
 __pycache__/
 hyperband/
 optuna_studies/
+checkpoints/
 *_report.txt
 
 
