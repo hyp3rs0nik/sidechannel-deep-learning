@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Number Typing Task</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <h1>Number Typing Task</h1>
+    <div id="instructions">
+        <p>Please type the numbers displayed below into the text area. Type the numbers as they appear, and the next group will load automatically. You may correct mistakes if needed, and keystrokes will be recorded for research purposes.</p>
+    </div>
+
+    <div id="round-selector">
+        <button class="round-button" data-rounds="10">10 Rounds</button>
+        <button class="round-button" data-rounds="15">15 Rounds</button>
+        <button class="round-button" data-rounds="20">20 Rounds</button>
+    </div>
+
+    <div id="sequence-display">&nbsp;</div>
+
+    <textarea id="typing-area" placeholder="Type the numbers here..." disabled></textarea>
+
+    <div id="progress-container">
+        <div id="progress-bar"></div>
+    </div>
+
+    <div id="action-buttons">
+        <button id="download-data" disabled>Download Data</button>
+        <button id="clear-data" disabled>Clear Data</button>
+    </div>
+
+    <div id="status">Select a number of rounds to begin.</div>
+
+    <script src="script.js"></script>
+</body>
+</html>

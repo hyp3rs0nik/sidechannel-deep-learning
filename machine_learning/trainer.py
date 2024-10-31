@@ -80,10 +80,10 @@ X_holdout_scaled = scaler.transform(X_holdout)
 
 # Define the Optuna objective function with cross-validation
 def objective(trial):
-    n_estimators = trial.suggest_int('n_estimators', 170, 190)
-    max_depth = trial.suggest_int('max_depth', 20, 30)
-    min_samples_split = trial.suggest_int('min_samples_split', 2, 4)
-    min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 3)
+    n_estimators = trial.suggest_int('n_estimators', 180, 186)
+    max_depth = trial.suggest_int('max_depth', 25, 30)
+    min_samples_split = trial.suggest_int('min_samples_split', 2, 3)
+    min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 2)
     max_features = trial.suggest_categorical('max_features', [None])
     
     rfc = RandomForestClassifier(
@@ -104,7 +104,7 @@ def objective(trial):
 
 # Step 4: Hyperparameter Optimization with Optuna
 study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=50, n_jobs=-1)
+study.optimize(objective, n_trials=10, n_jobs=1)
 
 print("Best Parameters:", study.best_params)
 print("Best Cross-Validation Accuracy:", study.best_value)
@@ -135,4 +135,8 @@ print(confusion_matrix(y_holdout, y_holdout_pred))
 # Save the model, scaler, and label encoder
 model_path = './data/models/machine_learning/rfc.pkl'
 os.makedirs(os.path.dirname(model_path), exist_ok=True)
-joblib.dump({'model': best_rfc, 'scaler': scaler, 'label_encoder': label_encoder}, model_path, compress=9)
+joblib.dump(
+    {'model': best_rfc, 'scaler': scaler, 'label_encoder': label_encoder}, 
+    model_path, 
+    compress=9
+)

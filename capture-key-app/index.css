@@ -1,0 +1,116 @@
+body {
+    background-color: #121212;
+    color: #ffffff;
+    font-family: Arial, sans-serif;
+    padding: 20px;
+}
+
+h1 {
+    text-align: center;
+    color: #ffcc00;
+}
+
+#instructions {
+    color: #cccccc;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+#round-selector {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+
+.round-button {
+    margin: 0 5px;
+    padding: 10px 20px;
+    font-size: 16px;
+    color: #ffffff;
+    background-color: #333333;
+    border: none;
+    cursor: pointer;
+    border-radius: 5px;
+    transition: background-color 0.3s;
+}
+
+.round-button:hover {
+    background-color: #555555;
+}
+
+.round-button.selected {
+    background-color: #4caf50;
+}
+
+.round-button:disabled {
+    background-color: #555555;
+    cursor: not-allowed;
+}
+
+#sequence-display {
+    font-size: 24px;
+    margin-bottom: 20px;
+    color: #ffcc00;
+    text-align: center;
+}
+
+#typing-area {
+    width: 100%;
+    height: 50px;
+    font-size: 24px;
+    background-color: #1e1e1e;
+    color: #ffffff;
+    border: 1px solid #333333;
+    padding: 5px;
+    box-sizing: border-box;
+    resize: none;
+}
+
+#progress-container {
+    width: 100%;
+    background-color: #333333;
+    border-radius: 5px;
+    overflow: hidden;
+    margin-top: 20px;
+    height: 20px;
+}
+
+#progress-bar {
+    width: 0%;
+    height: 100%;
+    background-color: #4caf50;
+    transition: width 0.3s;
+}
+
+#action-buttons {
+    display: flex;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+#download-data, #clear-data {
+    margin: 0 10px;
+    padding: 10px 20px;
+    font-size: 16px;
+    color: #ffffff;
+    background-color: #333333;
+    border: none;
+    cursor: pointer;
+    border-radius: 5px;
+    transition: background-color 0.3s;
+}
+
+#download-data:hover:not(:disabled), #clear-data:hover:not(:disabled) {
+    background-color: #555555;
+}
+
+#download-data:disabled, #clear-data:disabled {
+    background-color: #555555;
+    cursor: not-allowed;
+}
+
+#status {
+    margin-top: 10px;
+    color: #cccccc;
+    text-align: center;
+}

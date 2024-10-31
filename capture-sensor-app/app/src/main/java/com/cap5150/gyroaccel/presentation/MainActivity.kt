@@ -127,17 +127,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private fun sendBatchedDataToServer() {
         if (accumulatedSensorData.isNotEmpty()) {
-            val dataToSend = accumulatedSensorData.joinToString(
-                prefix = "[", postfix = "]", separator = ","
-            ) {
-                val parts = it.split(", ")
-                "{\"timestamp\": \"${parts[0]}\", \"x\": \"${parts[1]}\", \"y\": \"${parts[2]}\", \"z\": \"${parts[3]}\"}"
+            val dataToSend = accumulatedSensorData.joinToString(separator = "\n") {
+                it.replace(", ", ",")
             }
+
             accumulatedSensorData.clear()
 
             val client = OkHttpClient()
-            val body: RequestBody = dataToSend.toRequestBody("application/json".toMediaType())
-
+            val body: RequestBody = dataToSend.toRequestBody("text/csv".toMediaType())
             val request = Request.Builder()
                 .url("$SERVER_URL/sensor_data")
                 .post(body)
