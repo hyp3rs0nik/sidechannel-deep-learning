@@ -2,10 +2,10 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const morgan = require('morgan');
+const zlib = require('zlib');
 const { Schema, model, connection } = mongoose;
 
 const app = express();
-app.use(express.json({ limit: '5mb' }));
 app.use(cors());
 app.use(morgan('tiny'));
 
@@ -22,15 +22,19 @@ const connectWithRetry = async () => {
 };
 connectWithRetry();
 
-const sensorSchema = new Schema(
-  {
-    timestamp: { type: Number, required: true },
-    x: { type: Number, required: true },
-    y: { type: Number, required: true },
-    z: { type: Number, required: true },
-  },
-  { timestamps: false }
-);
+const sensorSchema = new Schema({
+  timestamp: { type: Number, required: true },
+  accel_x: { type: Number, required: true },
+  accel_y: { type: Number, required: true },
+  accel_z: { type: Number, required: true },
+  gyro_x: { type: Number, required: true },
+  gyro_y: { type: Number, required: true },
+  gyro_z: { type: Number, required: true },
+  rotation_x: { type: Number, required: true },
+  rotation_y: { type: Number, required: true },
+  rotation_z: { type: Number, required: true },
+  rotation_w: { type: Number, required: true },
+});
 
 const Sensor = model('Sensor', sensorSchema);
 
@@ -44,34 +48,54 @@ const bulkInsert = async (docs) => {
   }
 };
 
-app.post('/sensor_data', express.raw({ type: 'text/csv' }), async (req, res) => {
-  try {
-    const data = req.body.toString().trim().split('\n');
-    const sensorDocs = data.map((row) => {
-      const [timestamp, x, y, z] = row.split(',');
-      return {
-        timestamp: Number(timestamp),
-        x: parseFloat(x),
-        y: parseFloat(y),
-        z: parseFloat(z),
-      };
+app.post('/sensor_data', (req, res) => {
+  const chunks = [];
+  req.on('data', (chunk) => {
+      chunks.push(chunk);
+  });
+  req.on('end', () => {
+      const buffer = Buffer.concat(chunks);
+      zlib.gunzip(buffer, (err, decoded) => {
+        if (err) {
+            console.error('Error decompressing data:', err);
+            res.status(400).send('Error decompressing data');
+            return;
+        }
+        const dataStr = decoded.toString();
+        
+        try {
+            const dataArray = dataStr.split('\n').map((line) => JSON.parse(line.trim()));
+
+            const sensorDocs = dataArray.map((data) => ({
+                timestamp: data.timestamp,
+                accel_x: data.accel_x,
+                accel_y: data.accel_y,
+                accel_z: data.accel_z,
+                gyro_x: data.gyro_x,
+                gyro_y: data.gyro_y,
+                gyro_z: data.gyro_z,
+                rotation_x: data.rotation_x,
+                rotation_y: data.rotation_y,
+                rotation_z: data.rotation_z,
+                rotation_w: data.rotation_w,
+            }));
+
+            bulkInsert(sensorDocs);
+
+            res.status(200).send('OK');
+        } catch (parseErr) {
+            console.error('Error parsing JSON data:', parseErr);
+            res.status(400).send('Invalid JSON data format');
+        }
     });
-
-    await bulkInsert(sensorDocs);
-    res.status(200).send('Sensor data received.');
-  } catch (err) {
-    console.error('Error processing sensor data:', err);
-    res.status(500).send('Server error.');
-  }
+  });
 });
-
-// Graceful shutdown handling
+          
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
   await connection.close();
   process.exit(0);
 });
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}.`));
