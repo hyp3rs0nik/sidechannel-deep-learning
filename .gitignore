@@ -10,6 +10,8 @@ hyperband/
 optuna_studies/
 checkpoints/
 *_report.txt
+*.db
+catboost_info/
 
 
 # Node.js specific
