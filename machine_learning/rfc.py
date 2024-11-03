@@ -2,7 +2,7 @@ import pandas as pd
 import json
 import os
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split, cross_val_score, learning_curve
+from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val_score, learning_curve
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 import optuna
@@ -53,7 +53,7 @@ def extract_features(aligned_df):
         features_list.append(features)
     return pd.DataFrame(features_list)
 
-def plot_learning_curve(model, X, y):
+def plot_learning_curve(model, X, y, save_path='./docs/rfc_learning_curve.png'):
     train_sizes, train_scores, val_scores = learning_curve(
         model, X, y, cv=5, scoring='accuracy', n_jobs=-1,
         train_sizes=[0.1, 0.33, 0.55, 0.78, 1.0]
@@ -69,15 +69,19 @@ def plot_learning_curve(model, X, y):
     plt.title("Learning Curve")
     plt.legend(loc="best")
     plt.grid()
-    plt.show()
+
+    # Save the plot to the specified path
+    plt.savefig(save_path)
+    plt.close()
+
 
 def create_optuna_study(X_train, y_train):
     def objective(trial):
-        n_estimators = trial.suggest_int('n_estimators', 100, 500) 
-        max_depth = trial.suggest_int('max_depth', 10, 20)
-        min_samples_split = trial.suggest_int('min_samples_split', 5, 20)
-        min_samples_leaf = trial.suggest_int('min_samples_leaf', 2, 10)
-        max_features = trial.suggest_categorical('max_features', ['sqrt', 'log2'])
+        n_estimators = trial.suggest_int('n_estimators', 250, 700) 
+        max_depth = trial.suggest_int('max_depth', 12, 18)
+        min_samples_leaf = trial.suggest_int('min_samples_leaf', 3, 10)
+        min_samples_split = trial.suggest_int('min_samples_split', 5, 15)
+        max_features = trial.suggest_categorical('max_features', ['sqrt', 'log2', None])
 
         model = RandomForestClassifier(
             n_estimators=n_estimators,
@@ -88,17 +92,16 @@ def create_optuna_study(X_train, y_train):
             random_state=42
         )
         
-        score = cross_val_score(model, X_train, y_train, cv=5, scoring='accuracy').mean()
-        return score
+        return cross_val_score(model, X_train, y_train, cv=StratifiedKFold(n_splits=3), scoring='accuracy').mean()
 
     study = optuna.create_study(
         study_name="rf_hyperparameter_tuning",
         storage=OPTUNA_DB_PATH,
         direction='maximize',
-        load_if_exists=True  
+        load_if_exists=True,
     )
     
-    study.optimize(objective, n_trials=200, n_jobs=1)
+    study.optimize(objective, n_trials=100, n_jobs=1)
     return study
 
 def main():
@@ -143,5 +146,4 @@ def main():
 if __name__ == '__main__':
     model, best_params, test_score = main()
     print("Model:", model)
-    print("Best hyperparameters:", best_params)
     print("Test score:", test_score)

@@ -30,8 +30,8 @@ class BehaveFormer(nn.Module):
 
     def forward(self, x):
         x = self.embedding(x)
-        x = self.transformer_encoder(x)  # Now with batch as the first dimension
-        out = self.fc(x[:, -1, :])  # Take the last output in the sequence
+        x = self.transformer_encoder(x) 
+        out = self.fc(x[:, -1, :])
         return out
 
 def objective(trial):
@@ -51,13 +51,13 @@ def objective(trial):
     X_train, X_val, y_train, y_val = train_test_split(X_scaled, y_encoded, test_size=0.2, random_state=42)
 
     # Define Optuna hyperparameters
-    num_heads = trial.suggest_int('num_heads', 2, 8, step=2)
-    d_model = trial.suggest_int('d_model', num_heads * 8, num_heads * 32, step=num_heads * 8)
-    num_layers = trial.suggest_int('num_layers', 1, 4)
-    learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    dropout_prob = trial.suggest_float('dropout_prob', 0.2, 0.4)
-    weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-4, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+    num_heads = trial.suggest_int('num_heads', 2, 6, step=2)
+    d_model = trial.suggest_int('d_model', num_heads * 8, num_heads * 24, step=num_heads * 8)
+    num_layers = trial.suggest_int('num_layers', 2, 3)
+    learning_rate = trial.suggest_float('learning_rate', 5e-5, 5e-4, log=True)
+    dropout_prob = trial.suggest_float('dropout_prob', 0.2, 0.3)
+    weight_decay = trial.suggest_float('weight_decay', 1e-6, 5e-5, log=True)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64])
 
     X_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1).to(device)
     y_train = torch.tensor(y_train, dtype=torch.long).to(device)
@@ -89,7 +89,7 @@ def objective(trial):
             running_loss += loss.item()
 
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        #print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
 
         model.eval()
         val_loss = 0.0
@@ -100,7 +100,7 @@ def objective(trial):
                 val_loss += loss.item()
 
         avg_val_loss = val_loss / len(val_loader)
-        print(f"Validation Loss: {avg_val_loss:.4f}")
+        #print(f"Validation Loss: {avg_val_loss:.4f}")
 
         scheduler.step(avg_val_loss)
 
@@ -129,7 +129,7 @@ def objective(trial):
 
 def train_behaveformer():
     study = optuna.create_study(direction="maximize", study_name="behave_former_hyperparameter_tuning", storage="sqlite:///optuna_behaveformer_study.db", load_if_exists=True)
-    study.optimize(objective, n_trials=50, n_jobs=1)
+    study.optimize(objective, n_trials=50, n_jobs=6)
     best_params = study.best_params
 
     # Reload data to train final model
