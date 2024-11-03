@@ -144,21 +144,21 @@ function recordKeystroke(event) {
     if (!isTaskRunning) return;
 
     const timestamp = Date.now();
-    let actualKey = event.key;
+    let key = event.key;
 
     // Allow only digits and Backspace
-    if (digits.includes(actualKey) || actualKey === 'Backspace') {
-        typedData.push({ actualKey, timestamp });
+    if (digits.includes(key) || key === 'Backspace') {
+        typedData.push({ key, timestamp });
     } else {
         event.preventDefault();
         return;
     }
 
-    if (actualKey === 'Backspace') {
+    if (key === 'Backspace') {
         if (currentInputPosition > 0) {
             currentInputPosition--;
         }
-    } else if (digits.includes(actualKey)) {
+    } else if (digits.includes(key)) {
         currentInputPosition++;
     }
 
@@ -166,7 +166,6 @@ function recordKeystroke(event) {
         currentInputPosition = 0;
     }
 
-    // Move to next sequence after typing 5 digits
     if (currentInputPosition >= sequenceLength) {
         typingArea.disabled = true;
         setTimeout(() => {
