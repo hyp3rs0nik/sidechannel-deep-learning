@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val_score, learning_curve
 from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
 import optuna
 import joblib
 
@@ -22,17 +23,31 @@ def load_data():
     sensors_df = pd.read_csv('./data/training/sensors.csv')
     return keys_df, sensors_df
 
-def align_data(keys_df, sensors_df, window_ms=275):
+def align_data(keys_df, sensors_df, pre_window_ms=100, post_window_ms=175):
     keys_df['timestamp'] = keys_df['timestamp'].astype(int)
     sensors_df['timestamp'] = sensors_df['timestamp'].astype(int)
     keys_df.sort_values('timestamp', inplace=True)
     sensors_df.sort_values('timestamp', inplace=True)
 
-    aligned_df = pd.merge_asof(
-        sensors_df, keys_df, on='timestamp', direction='nearest', tolerance=window_ms
-    )
-    aligned_df.dropna(subset=['key'], inplace=True)
+    aligned_data = []
+
+    for _, key_row in keys_df.iterrows():
+        key_time = key_row['timestamp']
+        relevant_sensors = sensors_df[
+            (sensors_df['timestamp'] >= key_time - pre_window_ms) &
+            (sensors_df['timestamp'] <= key_time + post_window_ms)
+        ]
+        
+        if not relevant_sensors.empty:
+            for _, sensor_row in relevant_sensors.iterrows():
+                aligned_entry = sensor_row.to_dict()
+                aligned_entry['key'] = key_row['key']
+                aligned_data.append(aligned_entry)
+
+    aligned_df = pd.DataFrame(aligned_data)
+    
     return aligned_df
+
 
 def extract_features(aligned_df):
     features_list = []
@@ -99,8 +114,13 @@ def create_optuna_study(X_train, y_train):
             eval_metric='logloss',
             random_state=42
         )
-        
-        return cross_val_score(model, X_train, y_train, cv=StratifiedKFold(n_splits=3), scoring='accuracy').mean()
+
+        pipeline = Pipeline([
+            ('scaler', StandardScaler()),
+            ('model', model)
+        ])
+
+        return cross_val_score(pipeline, X_train, y_train, cv=StratifiedKFold(n_splits=5), scoring='accuracy').mean()
 
     study = optuna.create_study(
         study_name="xgboost_hyperparameter_tuning",
@@ -109,7 +129,7 @@ def create_optuna_study(X_train, y_train):
         load_if_exists=True
     )
     
-    study.optimize(objective, n_trials=100, n_jobs=11)
+    study.optimize(objective, n_trials=200, n_jobs=-1)
     return study
 
 def main():
@@ -124,22 +144,27 @@ def main():
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
 
+    # Split data before scaling to prevent data leakage
+    X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
+
+    # Apply scaling after split
     scaler = StandardScaler()
-    X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+    X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns)
+    X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X.columns)
 
-    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_encoded, test_size=0.2, random_state=42)
-
-    study = create_optuna_study(X_train, y_train)
+    # Optimize hyperparameters using Optuna
+    study = create_optuna_study(X_train_scaled, y_train)
 
     best_params = study.best_params
     model = XGBClassifier(**best_params, eval_metric='logloss')
-    model.fit(X_train, y_train)
+    model.fit(X_train_scaled, y_train)
 
-    test_score = model.score(X_test, y_test)
+    test_score = model.score(X_test_scaled, y_test)
     print("Test score on hold-out set:", test_score)
 
-    plot_learning_curve(model, X_train, y_train)
+    plot_learning_curve(model, X_train_scaled, y_train)
 
+    # Save model, scaler, and label encoder
     joblib.dump(model, f"{MODEL_PATH}/xgboost_model.pkl")
     joblib.dump(scaler, f"{MODEL_PATH}/scaler.pkl")
     joblib.dump(label_encoder, f"{MODEL_PATH}/label_encoder.pkl")
@@ -149,10 +174,34 @@ def main():
     print(f"Model, scaler, label encoder saved to {MODEL_PATH}")
     print(f"Best parameters saved to {PARAMS_PATH}")
 
+    # # Load collected data for testing
+
+    # print("Loading collected data...")
+
+    # collected_keys_df = pd.read_csv('./data/collected/keys.csv')
+    # collected_sensors_df = pd.read_csv('./data/collected/sensors.csv')
+    # collected_aligned_df = align_data(collected_keys_df, collected_sensors_df)
+    # print(f'Aligned data shape: {collected_aligned_df.shape}, columns: {collected_aligned_df.columns}')
+    # collected_features_df = extract_features(collected_aligned_df)
+    # print(f'Extracted features shape: {collected_features_df.shape}')
+
+    # # Prepare collected features for prediction
+    # X_collected = collected_features_df.drop(columns=['key'])
+    # X_collected_scaled = pd.DataFrame(scaler.transform(X_collected), columns=X.columns)
+
+    # # Predict using the trained model
+    # y_collected_pred = model.predict(X_collected_scaled)
+    # y_collected_pred_decoded = label_encoder.inverse_transform(y_collected_pred)
+
+    # # Save predictions
+    # collected_features_df['predicted_key'] = y_collected_pred_decoded
+    # collected_features_df.to_csv('./data/collected/predictions.csv', index=False)
+    # print("Predictions saved to ./data/collected/predictions.csv")
+
     return model, best_params, test_score
 
 if __name__ == '__main__':
     model, best_params, test_score = main()
     print("Model:", model)
     print("Test score:", test_score)
-
+    os.remove('optuna_xgboost_study.db')

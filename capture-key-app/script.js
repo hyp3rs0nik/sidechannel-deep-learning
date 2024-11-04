@@ -192,9 +192,9 @@ function endTask() {
 function downloadData() {
     if (typedData.length === 0) return;
 
-    let csvContent = "data:text/csv;charset=utf-8,actualKey,timestamp\n";
+    let csvContent = "data:text/csv;charset=utf-8,key,timestamp\n";
     typedData.forEach(function(row) {
-        csvContent += `${row.actualKey},${row.timestamp}\n`;
+        csvContent += `${row.key},${row.timestamp}\n`;
     });
 
     const encodedUri = encodeURI(csvContent);
