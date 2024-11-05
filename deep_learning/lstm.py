@@ -34,6 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+log_lock = threading.Lock()
 # Global variables to keep track of job statuses and best scores
 job_status = {}
 best_score_info = {
@@ -42,14 +43,18 @@ best_score_info = {
     'best_params': None,
     'trial_number': None
 }
-
-log_lock = threading.Lock()
+completed_trial_count = 0
+total_trial = 0
 
 def update_job_status(trial_number, epoch, val_loss, accuracy, f1, params):
-    global best_score_info
+    global best_score_info, completed_trial_count
     with log_lock:
         # Update the job status
         job_status[trial_number] = f"Trial {trial_number}: Epoch {epoch}, Val Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}, F1: {f1:.4f}"
+
+        # Check if the trial is completed and update the count
+        if epoch == 'Completed':  # Assumes 'Completed' is passed when the trial finishes
+            completed_trial_count += 1
 
         # Update the best score if this trial has a better F1 or accuracy
         if accuracy > best_score_info['best_accuracy'] or (accuracy == best_score_info['best_accuracy'] and f1 > best_score_info['best_f1']):
@@ -60,23 +65,22 @@ def update_job_status(trial_number, epoch, val_loss, accuracy, f1, params):
                 'trial_number': trial_number
             }
 
-def display_status_table(n_jobs):
+def display_status_table(n_jobs, total_trials):
     sys.stdout.write("\033[H\033[J")  # Clear the console
-    print("Training Status:")
-    print("=" * 250)
+    print(f"Training Status: {completed_trial_count} of {total_trials}")
+    print("=" * 90)
 
     # Display the best score at the top
     with log_lock:
         if best_score_info['best_params'] is not None:
             print(f"Best Trial {best_score_info['trial_number']}: Accuracy: {best_score_info['best_accuracy']:.4f}, "
                   f"F1: {best_score_info['best_f1']:.4f}, Params: {best_score_info['best_params']}")
-            print("=" * 250)
+            print("=" * 90)
 
         # Display only the current running trials (limited by n_jobs)
         current_running_trials = {k: v for k, v in job_status.items() if k in sorted(job_status.keys())[-n_jobs:]}
         for job_id, status in current_running_trials.items():
             print(status)
-        print("=" * 250)
     sys.stdout.flush()
 
 
