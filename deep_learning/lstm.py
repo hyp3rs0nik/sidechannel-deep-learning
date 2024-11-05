@@ -19,7 +19,11 @@ from scipy.fft import fft
 
 torch.backends.cudnn.enabled = True
 
-# Setting up logging
+import logging
+import threading
+import sys
+
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
@@ -30,7 +34,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Set seed for reproducibility
+# Global variables to keep track of job statuses and best scores
+job_status = {}
+best_score_info = {
+    'best_accuracy': 0.0,
+    'best_f1': 0.0,
+    'best_params': None,
+    'trial_number': None
+}
+
+log_lock = threading.Lock()
+
+def update_job_status(trial_number, epoch, val_loss, accuracy, f1, params):
+    global best_score_info
+    with log_lock:
+        # Update the job status
+        job_status[trial_number] = f"Trial {trial_number}: Epoch {epoch}, Val Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}, F1: {f1:.4f}"
+
+        # Update the best score if this trial has a better F1 or accuracy
+        if accuracy > best_score_info['best_accuracy'] or (accuracy == best_score_info['best_accuracy'] and f1 > best_score_info['best_f1']):
+            best_score_info = {
+                'best_accuracy': accuracy,
+                'best_f1': f1,
+                'best_params': params,
+                'trial_number': trial_number
+            }
+
+def display_status_table(n_jobs):
+    sys.stdout.write("\033[H\033[J")  # Clear the console
+    print("Training Status:")
+    print("=" * 250)
+
+    # Display the best score at the top
+    with log_lock:
+        if best_score_info['best_params'] is not None:
+            print(f"Best Trial {best_score_info['trial_number']}: Accuracy: {best_score_info['best_accuracy']:.4f}, "
+                  f"F1: {best_score_info['best_f1']:.4f}, Params: {best_score_info['best_params']}")
+            print("=" * 250)
+
+        # Display only the current running trials (limited by n_jobs)
+        current_running_trials = {k: v for k, v in job_status.items() if k in sorted(job_status.keys())[-n_jobs:]}
+        for job_id, status in current_running_trials.items():
+            print(status)
+        print("=" * 250)
+    sys.stdout.flush()
+
+
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -54,7 +104,7 @@ def load_data():
     sensors_df = pd.read_csv('./data/training/sensors.csv')
     return keys_df, sensors_df
 
-# Enhanced alignment logic
+
 def align_keys_to_sensors(keys_df, sensors_df, window_ms=550):
     keys_df['timestamp'] = keys_df['timestamp'].astype(int)
     sensors_df['timestamp'] = sensors_df['timestamp'].astype(int)
@@ -65,7 +115,7 @@ def align_keys_to_sensors(keys_df, sensors_df, window_ms=550):
     logger.info(f"Aligned Data Shape: {aligned_df.shape}")
     return aligned_df
 
-# Comprehensive feature extraction
+
 def extract_features(aligned_data, window_size=25, step_size=12):
     sequences = []
     labels = []
@@ -74,86 +124,86 @@ def extract_features(aligned_data, window_size=25, step_size=12):
         for i in range(0, len(group) - window_size + 1, step_size):
             window_data = group.iloc[i:i + window_size]
 
-            # Temporal features
+            
             time_diff = window_data['timestamp'].diff().fillna(0).values
             accel_diff_x = window_data['accel_x'].diff().fillna(0).values
             accel_diff_y = window_data['accel_y'].diff().fillna(0).values
             accel_diff_z = window_data['accel_z'].diff().fillna(0).values
             gyro_diff_x = window_data['gyro_x'].diff().fillna(0).values
             gyro_diff_y = window_data['gyro_y'].diff().fillna(0).values
-            gyro_diff_z = window_data['gyro_z'].diff().fillna(0).values
+            
             rot_diff_x = window_data['rotation_x'].diff().fillna(0).values
             rot_diff_y = window_data['rotation_y'].diff().fillna(0).values
             rot_diff_z = window_data['rotation_z'].diff().fillna(0).values
             rot_diff_w = window_data['rotation_w'].diff().fillna(0).values
 
-            # Frequency-domain features (FFT)
+            
             fft_accel_x = fft(window_data['accel_x'])
             fft_accel_y = fft(window_data['accel_y'])
             fft_accel_z = fft(window_data['accel_z'])
-            fft_gyro_x = fft(window_data['gyro_x'])
-            fft_gyro_y = fft(window_data['gyro_y'])
-            fft_gyro_z = fft(window_data['gyro_z'])
+            
+            
+            
             fft_rotation_x = fft(window_data['rotation_x'])
-            fft_rotation_y = fft(window_data['rotation_y'])
-            fft_rotation_z = fft(window_data['rotation_z'])
-            fft_rotation_w = fft(window_data['rotation_w'])
+            
+            
+            
 
-            # Statistical and frequency-based features
+            
             features = {
-                # Accelerometer statistics
-                'rms_accel': np.sqrt(np.mean(window_data[['accel_x', 'accel_y', 'accel_z']] ** 2)),
-                'mean_accel_x': window_data['accel_x'].mean(),
-                'mean_accel_y': window_data['accel_y'].mean(),
-                'mean_accel_z': window_data['accel_z'].mean(),
-                'std_accel_x': window_data['accel_x'].std(),
-                'std_accel_y': window_data['accel_y'].std(),
-                'std_accel_z': window_data['accel_z'].std(),
                 
-                # Gyroscope statistics
-                'rms_gyro': np.sqrt(np.mean(window_data[['gyro_x', 'gyro_y', 'gyro_z']] ** 2)),
-                'mean_gyro_x': window_data['gyro_x'].mean(),
-                'mean_gyro_y': window_data['gyro_y'].mean(),
-                'mean_gyro_z': window_data['gyro_z'].mean(),
-                'std_gyro_x': window_data['gyro_x'].std(),
-                'std_gyro_y': window_data['gyro_y'].std(),
-                'std_gyro_z': window_data['gyro_z'].std(),
+                'rms_accel': np.sqrt(np.mean(window_data[['accel_x', 'accel_y', 'accel_z']] ** 2)),
+                'mean_accel_x': window_data['accel_x'].mean(),  
+                'mean_accel_y': window_data['accel_y'].mean(),  
+                'mean_accel_z': window_data['accel_z'].mean(),  
+                'std_accel_rms': np.sqrt(np.mean([window_data['accel_x'].std()**2, window_data['accel_y'].std()**2, window_data['accel_z'].std()**2])),
+                'std_accel_y': window_data['accel_y'].std(),  
+                'std_accel_z': window_data['accel_z'].std(),  
 
-                # Rotation data statistics (fusion sensor)
-                'rms_rotation': np.sqrt(np.mean(window_data[['rotation_x', 'rotation_y', 'rotation_z', 'rotation_w']] ** 2)),
-                'mean_rotation_x': window_data['rotation_x'].mean(),
-                'mean_rotation_y': window_data['rotation_y'].mean(),
-                'mean_rotation_z': window_data['rotation_z'].mean(),
-                'mean_rotation_w': window_data['rotation_w'].mean(),
-                'std_rotation_x': window_data['rotation_x'].std(),
-                'std_rotation_y': window_data['rotation_y'].std(),
-                'std_rotation_z': window_data['rotation_z'].std(),
-                'std_rotation_w': window_data['rotation_w'].std(),
+                
+                'rms_gyro': np.sqrt(np.mean(window_data[['gyro_x', 'gyro_y', 'gyro_z']] ** 2)),  
+                'mean_gyro_x': window_data['gyro_x'].mean(),  
+                'mean_gyro_y': window_data['gyro_y'].mean(),  
+                'mean_gyro_z': window_data['gyro_z'].mean(),  
+                
+                
+                
 
-                # FFT mean values for frequency analysis
-                'fft_mean_accel_x': np.mean(np.abs(fft_accel_x)),
-                'fft_mean_accel_y': np.mean(np.abs(fft_accel_y)),
-                'fft_mean_accel_z': np.mean(np.abs(fft_accel_z)),
-                'fft_mean_gyro_x': np.mean(np.abs(fft_gyro_x)),
-                'fft_mean_gyro_y': np.mean(np.abs(fft_gyro_y)),
-                'fft_mean_gyro_z': np.mean(np.abs(fft_gyro_z)),
-                'fft_mean_rotation_x': np.mean(np.abs(fft_rotation_x)),
-                'fft_mean_rotation_y': np.mean(np.abs(fft_rotation_y)),
-                'fft_mean_rotation_z': np.mean(np.abs(fft_rotation_z)),
-                'fft_mean_rotation_w': np.mean(np.abs(fft_rotation_w)),
+                
+                'rms_rotation': np.sqrt(np.mean(window_data[['rotation_x', 'rotation_y', 'rotation_z', 'rotation_w']] ** 2)),  
+                'mean_rotation_x': window_data['rotation_x'].mean(),  
+                'mean_rotation_y': window_data['rotation_y'].mean(),  
+                'mean_rotation_z': window_data['rotation_z'].mean(),  
+                
+                'std_rotation_rms': np.sqrt(np.mean([window_data['rotation_x'].std()**2, window_data['rotation_y'].std()**2, window_data['rotation_z'].std()**2, window_data['rotation_w'].std()**2])),
+                
+                
+                
 
-                # Temporal statistics
-                'time_diff_mean': np.mean(time_diff),
-                'accel_diff_mean_x': np.mean(accel_diff_x),
-                'accel_diff_mean_y': np.mean(accel_diff_y),
-                'accel_diff_mean_z': np.mean(accel_diff_z),
-                'gyro_diff_mean_x': np.mean(gyro_diff_x),
-                'gyro_diff_mean_y': np.mean(gyro_diff_y),
-                'gyro_diff_mean_z': np.mean(gyro_diff_z),
-                'rot_diff_mean_x': np.mean(rot_diff_x),
-                'rot_diff_mean_y': np.mean(rot_diff_y),
-                'rot_diff_mean_z': np.mean(rot_diff_z),
-                'rot_diff_mean_w': np.mean(rot_diff_w),
+                
+                'fft_mean_accel_x': np.mean(np.abs(fft_accel_x)),  
+                'fft_mean_accel_y': np.mean(np.abs(fft_accel_y)),  
+                'fft_mean_accel_z': np.mean(np.abs(fft_accel_z)),  
+                
+                
+                
+                'fft_mean_rotation_x': np.mean(np.abs(fft_rotation_x)),  
+                
+                
+                
+
+                
+                'time_diff_mean': np.mean(time_diff),  
+                'accel_diff_mean_x': np.mean(accel_diff_x),  
+                'accel_diff_mean_y': np.mean(accel_diff_y),  
+                'accel_diff_mean_z': np.mean(accel_diff_z),  
+                'gyro_diff_mean_x': np.mean(gyro_diff_x),  
+                'gyro_diff_mean_y': np.mean(gyro_diff_y),  
+                
+                'rot_diff_mean_agg': np.mean([np.mean(rot_diff_x), np.mean(rot_diff_y), np.mean(rot_diff_z), np.mean(rot_diff_w)]),
+                
+                
+                
             }
 
             sequences.append(features)
@@ -163,7 +213,6 @@ def extract_features(aligned_data, window_size=25, step_size=12):
     features_df['key'] = labels
     logger.info(f"Shape of features after extraction: {features_df.shape}")
     return features_df
-
 
 
 def preprocess_data():
@@ -189,7 +238,7 @@ def preprocess_data():
 
     return X_scaled, y_encoded, scaler, label_encoder
 
-# BiLSTM with attention mechanism
+
 class AttentionLayer(nn.Module):
     def __init__(self, input_dim):
         super(AttentionLayer, self).__init__()
@@ -205,7 +254,7 @@ class BiLSTMWithAttention(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, dropout_prob=0.3):
         super(BiLSTMWithAttention, self).__init__()
         self.num_layers = num_layers
-        # Apply dropout only if num_layers > 1
+        
         dropout_value = dropout_prob if num_layers > 1 else 0.0
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=dropout_value)
         self.attention = nn.Linear(hidden_size * 2, 1)
@@ -214,22 +263,22 @@ class BiLSTMWithAttention(nn.Module):
 
 
     def forward(self, x):
-        # Initialize hidden state and cell state
+        
         h0 = torch.zeros(self.lstm.num_layers * 2, x.size(0), self.lstm.hidden_size).to(device)
         c0 = torch.zeros(self.lstm.num_layers * 2, x.size(0), self.lstm.hidden_size).to(device)
 
-        lstm_out, _ = self.lstm(x, (h0, c0))  # lstm_out shape: (batch_size, seq_length, hidden_size * 2)
+        lstm_out, _ = self.lstm(x, (h0, c0))  
 
-        # Compute attention scores
-        attention_scores = torch.tanh(self.attention(lstm_out))  # Shape: (batch_size, seq_length, 1)
-        attention_weights = torch.softmax(attention_scores, dim=1)  # Shape: (batch_size, seq_length, 1)
+        
+        attention_scores = torch.tanh(self.attention(lstm_out))  
+        attention_weights = torch.softmax(attention_scores, dim=1)  
 
-        # Apply attention weights to LSTM outputs
-        context_vector = torch.sum(attention_weights * lstm_out, dim=1)  # Shape: (batch_size, hidden_size * 2)
+        
+        context_vector = torch.sum(attention_weights * lstm_out, dim=1)  
 
-        # Apply dropout and fully connected layer
+        
         out = self.dropout(context_vector)
-        out = self.fc(out)  # Shape: (batch_size, output_size)
+        out = self.fc(out)  
 
         return out
 
@@ -300,7 +349,9 @@ def train_lstm(n_trials=50, n_jobs=1, num_workers=4):
             avg_val_loss = val_loss / len(val_loader)
             accuracy = accuracy_score(all_labels, all_preds)
             f1 = f1_score(all_labels, all_preds, average='weighted')
-            logger.info(f"Epoch {epoch+1}/{num_epochs}, Val Loss: {avg_val_loss:.4f}, Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+
+            update_job_status(trial.number, epoch + 1, avg_val_loss, accuracy, f1, trial.params)
+            display_status_table(n_jobs)
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -314,16 +365,16 @@ def train_lstm(n_trials=50, n_jobs=1, num_workers=4):
 
         return f1
 
-    # Optimize the hyperparameters using Optuna
+    
     study = optuna.create_study(
         study_name="lstm_hyperparameter_tuning",
         storage='sqlite:///optuna_lstm_study.db',
         direction='maximize',
-        load_if_exists=True
+        load_if_exists=True,
     )
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, gc_after_trial=True)
 
-    # Log and save the best hyperparameters
+    
     if study.best_trial:
         best_params = study.best_trial.params
         logger.info(f"Best trial value: {study.best_trial.value:.4f}")
@@ -332,7 +383,7 @@ def train_lstm(n_trials=50, n_jobs=1, num_workers=4):
         logger.error("No successful trials were completed.")
         sys.exit(1)
 
-    # Train the final model with the best parameters
+    
     model = BiLSTMWithAttention(
         input_size=X_scaled.shape[1],
         hidden_size=best_params['hidden_size'],
@@ -394,7 +445,7 @@ def train_lstm(n_trials=50, n_jobs=1, num_workers=4):
             logger.info("Early stopping triggered during final training.")
             break
 
-    # Save the model and artifacts
+    
     torch.save(model.state_dict(), os.path.join(MODEL_PATH, "bilstm_attention_model.pth"))
     joblib.dump(scaler, os.path.join(MODEL_PATH, "scaler.pkl"))
     joblib.dump(label_encoder, os.path.join(MODEL_PATH, "label_encoder.pkl"))
