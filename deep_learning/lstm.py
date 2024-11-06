@@ -47,7 +47,7 @@ def update_job_status(trial_number, epoch, val_loss, accuracy, f1, params=None):
     global best_score_info
     with log_lock:
         job_status[trial_number] = (
-            f"Trial {str(trial_number).zfill(3)}: Epoch {str(epoch).zfill(3)}, Val Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}, F1: {f1:.4f}"
+            f"Trial {str(trial_number).zfill(3)}: Epoch {str(epoch).zfill(3)}, Val Loss: {val_loss:.4f}, F1: {f1:.4f}, Accuracy: {accuracy:.4f}"
         )
 
         if accuracy > best_score_info["best_accuracy"] or (
@@ -78,7 +78,7 @@ def trial_callback(study, trial):
             trial.params,
         )
 
-    display_status_table(study.trials._storage.get_trial_count())
+    display_status_table(len(study.trials))
 
 
 def display_status_table(total_trials):
@@ -99,7 +99,7 @@ def display_status_table(total_trials):
         current_running_trials = {
             k: v for k, v in job_status.items() if k not in completed_trials
         }
-        for job_id, status in current_running_trials.items():
+        for job_id, status in sorted(current_running_trials.items()):
             print(status)
 
     sys.stdout.flush()
@@ -144,7 +144,7 @@ def align_keys_to_sensors(keys_df, sensors_df, window_ms=550):
     return aligned_df
 
 
-def extract_features(aligned_data, window_size=25, step_size=12):
+def extract_features(aligned_data, window_size=10, step_size=5):
     sequences = []
     labels = []
 
@@ -482,8 +482,8 @@ def train_lstm(n_trials=50, n_jobs=1, num_workers=4):
         pin_memory=True,
     )
 
-    num_epochs = 50
-    patience = 10
+    num_epochs = 100
+    patience = 7
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
