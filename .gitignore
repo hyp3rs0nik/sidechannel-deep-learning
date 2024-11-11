@@ -12,6 +12,7 @@ checkpoints/
 *_report.txt
 *.db
 catboost_info/
+*.sqlite
 
 
 # Node.js specific
