@@ -21,14 +21,14 @@ os.makedirs("./data/models", exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-NUM_TRIALS = 128
-NUM_EPOCHS = 128
+NUM_TRIALS = 100
+NUM_EPOCHS = 100
 BATCH_SIZE = 32
 EARLY_STOPPING_PATIENCE = 8
 NUM_WORKERS = 4
 WINDOW_SIZE = 8
 OVERFITTING_THRESHOLD = 0.04
-AUGMENTATION_LEVEL = 1
+AUGMENTATION_LEVEL = 0
 
 
 parser = argparse.ArgumentParser(description="Select the model architecture.")
@@ -182,7 +182,7 @@ def objective(trial, study):
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5)
     learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-
+    
     model = get_model(
         args.model, model_input.shape[2], hidden_dim,
         11, num_layers, dropout_rate
