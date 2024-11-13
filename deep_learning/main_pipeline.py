@@ -60,7 +60,14 @@ def augment_sensor_data(sensor_data):
         return augmented_data
     return sensor_data
 
-
+def key_to_label(key):
+    if key.isdigit():
+        return int(key)
+    elif key == "Enter":
+        return 10
+    else:
+        raise ValueError(f"Unexpected key: {key}")
+    
 sensor_df[["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]] = (
     augment_sensor_data(
         sensor_df[
@@ -114,51 +121,69 @@ sensor_df["gyro_magnitude"] = np.sqrt(
 )
 
 
+# Parameters for overlapping windows
 window_size = WINDOW_SIZE
+stride = 2  # Adjust stride to control overlap
+
 sensor_sequences = []
+displacement_labels = []
 
-for i in range(len(displacement_vectors)):
-    start_idx = i * window_size
-    end_idx = start_idx + window_size
-    if end_idx <= len(sensor_df):
-        sensor_window = sensor_df.iloc[start_idx:end_idx][
-            [
-                "accel_x",
-                "accel_y",
-                "accel_z",
-                "gyro_x",
-                "gyro_y",
-                "gyro_z",
-                "accel_magnitude",
-                "gyro_magnitude",
-            ]
-        ].values
-        sensor_sequences.append(sensor_window)
+# Diagnostic logs
+print("Starting sample generation process...")
+print(f"Total displacement vectors: {len(displacement_vectors)}")
+print(f"Total sensor data points: {len(sensor_df)}")
+print(f"Window size: {window_size}, Stride: {stride}")
 
+# Loop through each displacement vector
+for i, (dx, dy) in enumerate(displacement_vectors):
+    start_idx = i * stride  # Start index for each sensor sequence, adjusted by stride
+
+    # Generate multiple sensor windows per displacement
+    for j in range(0, window_size, stride):
+        end_idx = start_idx + window_size
+        if end_idx <= len(sensor_df):
+            sensor_window = sensor_df.iloc[start_idx:end_idx][
+                ["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z", "accel_magnitude", "gyro_magnitude"]
+            ].values
+            sensor_sequences.append(sensor_window)
+            # Repeat the spatial displacement vector for each generated sensor window
+            displacement_labels.append((dx, dy))
+        
+        # Move to the next overlapping window
+        start_idx += stride
+
+# After processing, ensure the sample count
 sensor_sequences = np.array(sensor_sequences)
-displacement_features = np.repeat(
-    np.array(displacement_vectors).reshape(-1, 1, 2), window_size, axis=1
-)
-model_input = np.concatenate((sensor_sequences, displacement_features), axis=2)
+displacement_features = np.array(displacement_labels).reshape(-1, 1, 2).repeat(window_size, axis=1)
+print(f"Total generated sensor sequences: {sensor_sequences.shape[0]}")
 
+# Merge sensor data with displacement vectors for model input
+model_input = np.concatenate((sensor_sequences, displacement_features), axis=2)
 X = torch.tensor(model_input, dtype=torch.float32)
 
-
-def key_to_label(key):
-    if key.isdigit():
-        return int(key)
-    elif key == "Enter":
-        return 10
-    else:
-        raise ValueError(f"Unexpected key: {key}")
-
-
+# Label generation for keys
 y = torch.tensor(
     [key_to_label(key) for key in keys_df["key"][: len(displacement_vectors)]],
     dtype=torch.long,
 )
 
-dataset = TensorDataset(X, y)
+# Ensure that model input and labels align
+print(f"Model input shape: {X.shape}, Labels shape: {y.shape}")
+print("Sample generation complete. Ready for model training.")
+
+repeat_factor = (window_size // stride)
+
+# Repeat each label in `y` to match the number of generated sensor sequences in `X`
+expanded_y = y.repeat_interleave(repeat_factor)
+
+# Adjust if any extra sequences were created
+expanded_y = expanded_y[:len(sensor_sequences)]
+
+# Final verification log
+print(f"Expanded Labels shape: {expanded_y.shape}, should match Model input shape: {X.shape}")
+
+# Create the dataset
+dataset = TensorDataset(X, expanded_y)
 
 def get_model(model_type, input_dim, hidden_dim, output_dim, num_layers, dropout_rate):
     if model_type == "gru":
@@ -197,7 +222,7 @@ def objective(trial, study):
     best_accuracy = 0
     best_model_state = None
 
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(X, expanded_y)):
         train_dataset = torch.utils.data.Subset(dataset, train_idx)
         val_dataset = torch.utils.data.Subset(dataset, val_idx)
 
