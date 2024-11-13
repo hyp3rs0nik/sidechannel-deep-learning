@@ -19,13 +19,13 @@ from lstm_attn_model import AttentionLSTMModel
 os.makedirs("./data/models", exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+print(f"Using device: {device}")
 
 NUM_TRIALS = 100
 NUM_EPOCHS = 100
 BATCH_SIZE = 32
 EARLY_STOPPING_PATIENCE = 8
-NUM_WORKERS = 4
+NUM_WORKERS = 6
 WINDOW_SIZE = 8
 OVERFITTING_THRESHOLD = 0.04
 AUGMENTATION_LEVEL = 0
@@ -306,7 +306,7 @@ def objective(trial, study):
 
 def main():
     study = optuna.create_study(direction="maximize", study_name=f"dl_hyperparameter_tuning_{args.model}", storage="sqlite:///data/db.sqlite", load_if_exists=True)
-    study.optimize(lambda trial: objective(trial, study), n_trials=NUM_TRIALS)
+    study.optimize(lambda trial: objective(trial, study), n_trials=NUM_TRIALS, n_jobs=2)
 
 main()
 
