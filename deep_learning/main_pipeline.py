@@ -6,8 +6,13 @@ import torch.nn as nn
 import torch.optim as optim
 import pandas as pd
 import optuna
+import random
+import copy
+import torch.backends.cudnn as cudnn
+
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
 from torch.utils.data import DataLoader, TensorDataset
 from torch.cuda.amp import autocast, GradScaler
 
@@ -15,22 +20,37 @@ from behaveformer_model import BehaviorNetModel
 from gru_attn_model import AttentionGRUModel
 from lstm_attn_model import AttentionLSTMModel
 
-
+# Create the models directory if it doesn't exist
 os.makedirs("./data/models", exist_ok=True)
 
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Hyperparameters and constants
 NUM_TRIALS = 100
 NUM_EPOCHS = 100
 BATCH_SIZE = 32
 EARLY_STOPPING_PATIENCE = 8
 NUM_WORKERS = 6
 WINDOW_SIZE = 8
-OVERFITTING_THRESHOLD = 0.04
-AUGMENTATION_LEVEL = 0
+OVERFITTING_THRESHOLD = 0.0001  # Small threshold for validation loss improvement
+AUGMENTATION_LEVEL = 0  # Set to 1 to enable augmentation
+STRIDE = 1  # Decrease stride to increase the number of samples
 
+# Set random seeds for reproducibility
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == 'cuda':
+        torch.cuda.manual_seed(seed)
+        cudnn.deterministic = True
+        cudnn.benchmark = False
 
+seed_everything()
+
+# Argument parser for model selection
 parser = argparse.ArgumentParser(description="Select the model architecture.")
 parser.add_argument(
     "--model",
@@ -41,25 +61,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-
-keys_df = pd.read_csv("./data/training/keys.csv")
-sensor_df = pd.read_csv("./data/training/sensor_v2_denoise_2.25hz.csv")
-
-
-scaler = StandardScaler()
-sensor_df[["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]] = (
-    scaler.fit_transform(
-        sensor_df[["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]]
-    )
-)
-
-def augment_sensor_data(sensor_data):
-    if AUGMENTATION_LEVEL == 1:
-        noise = np.random.normal(0, 0.01, sensor_data.shape)
-        augmented_data = sensor_data + noise
-        return augmented_data
-    return sensor_data
-
+# Define key_to_label function early
 def key_to_label(key):
     if key.isdigit():
         return int(key)
@@ -67,123 +69,67 @@ def key_to_label(key):
         return 10
     else:
         raise ValueError(f"Unexpected key: {key}")
+
+def generate_samples(sensor_df, keys_df, window_size, stride):
+    # Ensure 'timestamp' columns exist
+    if 'timestamp' not in sensor_df.columns or 'timestamp' not in keys_df.columns:
+        raise ValueError("Both sensor_df and keys_df must have a 'timestamp' column.")
     
-sensor_df[["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]] = (
-    augment_sensor_data(
-        sensor_df[
-            ["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]
+    # Filter 'Backspace' and prepare labels
+    keys_df = keys_df[keys_df["key"] != "Backspace"].copy()
+    keys_df.loc[:, 'label'] = keys_df['key'].apply(key_to_label)
+    
+    # Precompute magnitudes
+    sensor_df["accel_magnitude"] = np.linalg.norm(sensor_df[["accel_x", "accel_y", "accel_z"]], axis=1)
+    sensor_df["gyro_magnitude"] = np.linalg.norm(sensor_df[["gyro_x", "gyro_y", "gyro_z"]], axis=1)
+
+    # Prepare variables
+    sensor_sequences, labels = [], []
+    sensor_timestamps = sensor_df['timestamp'].values
+    key_timestamps = keys_df['timestamp'].values
+    key_labels = keys_df['label'].values
+
+    print("Generating sensor sequences and labels...")
+
+    # Map each sensor window to a label based on the closest timestamped key press
+    key_indices = np.searchsorted(sensor_timestamps, key_timestamps, side="right") - 1
+
+    # Iterate with windowed sampling and label assignment
+    for i in range(0, len(sensor_df) - window_size + 1, stride):
+        # Extract the sensor window
+        sensor_window = sensor_df.iloc[i:i + window_size][
+            ["accel_x", "accel_y", "accel_z",
+             "gyro_x", "gyro_y", "gyro_z",
+             "accel_magnitude", "gyro_magnitude"]
         ].values
-    )
-)
-
-key_coordinates = {
-    "1": (0, 0),
-    "2": (0, 1),
-    "3": (0, 2),
-    "4": (1, 0),
-    "5": (1, 1),
-    "6": (1, 2),
-    "7": (2, 0),
-    "8": (2, 1),
-    "9": (2, 2),
-    "0": (2.5, 1),
-    "Enter": (2.5, 3),
-}
-
-def compute_displacement_vector(key1, key2):
-    if key1 in key_coordinates and key2 in key_coordinates:
-        x1, y1 = key_coordinates[key1]
-        x2, y2 = key_coordinates[key2]
-        dx = x2 - x1
-        dy = y2 - y1
-        return dx, dy
-    else:
-        return None, None
-
-
-keys_df = keys_df[keys_df["key"] != "Backspace"]
-displacement_vectors = []
-previous_key = None
-
-for key in keys_df["key"]:
-    if previous_key is not None:
-        dx, dy = compute_displacement_vector(previous_key, key)
-        if dx is not None and dy is not None:
-            displacement_vectors.append((dx, dy))
-    previous_key = key
-
-
-sensor_df["accel_magnitude"] = np.sqrt(
-    sensor_df["accel_x"] ** 2 + sensor_df["accel_y"] ** 2 + sensor_df["accel_z"] ** 2
-)
-sensor_df["gyro_magnitude"] = np.sqrt(
-    sensor_df["gyro_x"] ** 2 + sensor_df["gyro_y"] ** 2 + sensor_df["gyro_z"] ** 2
-)
-
-
-# Parameters for overlapping windows
-window_size = WINDOW_SIZE
-stride = 2  # Adjust stride to control overlap
-
-sensor_sequences = []
-displacement_labels = []
-
-# Diagnostic logs
-print("Starting sample generation process...")
-print(f"Total displacement vectors: {len(displacement_vectors)}")
-print(f"Total sensor data points: {len(sensor_df)}")
-print(f"Window size: {window_size}, Stride: {stride}")
-
-# Loop through each displacement vector
-for i, (dx, dy) in enumerate(displacement_vectors):
-    start_idx = i * stride  # Start index for each sensor sequence, adjusted by stride
-
-    # Generate multiple sensor windows per displacement
-    for j in range(0, window_size, stride):
-        end_idx = start_idx + window_size
-        if end_idx <= len(sensor_df):
-            sensor_window = sensor_df.iloc[start_idx:end_idx][
-                ["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z", "accel_magnitude", "gyro_magnitude"]
-            ].values
-            sensor_sequences.append(sensor_window)
-            # Repeat the spatial displacement vector for each generated sensor window
-            displacement_labels.append((dx, dy))
+        sensor_sequences.append(sensor_window)
         
-        # Move to the next overlapping window
-        start_idx += stride
+        # Find relevant keys in the window
+        window_start_time = sensor_timestamps[i]
+        window_end_time = sensor_timestamps[i + window_size - 1]
+        keys_in_window = key_labels[(key_timestamps >= window_start_time) & (key_timestamps <= window_end_time)]
+        
+        # Assign the label for the last key press in the window or -1 if none
+        label = keys_in_window[-1] if keys_in_window.size > 0 else -1
+        labels.append(label)
 
-# After processing, ensure the sample count
-sensor_sequences = np.array(sensor_sequences)
-displacement_features = np.array(displacement_labels).reshape(-1, 1, 2).repeat(window_size, axis=1)
-print(f"Total generated sensor sequences: {sensor_sequences.shape[0]}")
+    # Convert to arrays and filter invalid labels
+    sensor_sequences = np.array(sensor_sequences)
+    labels = np.array(labels)
+    valid_indices = labels != -1
+    sensor_sequences = sensor_sequences[valid_indices]
+    labels = labels[valid_indices]
 
-# Merge sensor data with displacement vectors for model input
-model_input = np.concatenate((sensor_sequences, displacement_features), axis=2)
-X = torch.tensor(model_input, dtype=torch.float32)
+    print(f"Total generated sensor sequences: {sensor_sequences.shape[0]}")
 
-# Label generation for keys
-y = torch.tensor(
-    [key_to_label(key) for key in keys_df["key"][: len(displacement_vectors)]],
-    dtype=torch.long,
-)
+    return sensor_sequences, labels
 
-# Ensure that model input and labels align
-print(f"Model input shape: {X.shape}, Labels shape: {y.shape}")
-print("Sample generation complete. Ready for model training.")
+# Load data
+keys_df = pd.read_csv("./data/training/keys.csv")
+sensor_df = pd.read_csv("./data/training/sensor_v2_denoise_2.25hz.csv")
 
-repeat_factor = (window_size // stride)
-
-# Repeat each label in `y` to match the number of generated sensor sequences in `X`
-expanded_y = y.repeat_interleave(repeat_factor)
-
-# Adjust if any extra sequences were created
-expanded_y = expanded_y[:len(sensor_sequences)]
-
-# Final verification log
-print(f"Expanded Labels shape: {expanded_y.shape}, should match Model input shape: {X.shape}")
-
-# Create the dataset
-dataset = TensorDataset(X, expanded_y)
+# Generate samples
+sensor_sequences, labels = generate_samples(sensor_df, keys_df, WINDOW_SIZE, STRIDE)
 
 def get_model(model_type, input_dim, hidden_dim, output_dim, num_layers, dropout_rate):
     if model_type == "gru":
@@ -201,7 +147,7 @@ def get_model(model_type, input_dim, hidden_dim, output_dim, num_layers, dropout
     else:
         raise ValueError("Invalid model type selected.")
 
-def objective(trial, study):
+def objective(trial):
     hidden_dim = trial.suggest_int("hidden_dim", 64, 256)
     num_layers = trial.suggest_int("num_layers", 1, 3)
     dropout_rate = trial.suggest_float("dropout_rate", 0.2, 0.5)
@@ -209,27 +155,71 @@ def objective(trial, study):
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     
     model = get_model(
-        args.model, model_input.shape[2], hidden_dim,
+        args.model, sensor_sequences.shape[2], hidden_dim,
         11, num_layers, dropout_rate
     ).to(device)
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scaler = GradScaler()
 
     kfold = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     avg_accuracy = 0
     best_accuracy = 0
     best_model_state = None
 
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(X, expanded_y)):
-        train_dataset = torch.utils.data.Subset(dataset, train_idx)
-        val_dataset = torch.utils.data.Subset(dataset, val_idx)
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(sensor_sequences, labels)):
+        # Extract training and validation data
+        X_train = sensor_sequences[train_idx]
+        y_train = labels[train_idx]
+        X_val = sensor_sequences[val_idx]
+        y_val = labels[val_idx]
 
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
+        # Reshape for scaling
+        num_train_samples, window_size, num_features = X_train.shape
+        X_train_flat = X_train.reshape(-1, num_features)
+
+        # Fit scaler on training data
+        scaler = StandardScaler()
+        X_train_flat_scaled = scaler.fit_transform(X_train_flat)
+
+        # Transform training data
+        X_train_scaled = X_train_flat_scaled.reshape(num_train_samples, window_size, num_features)
+
+        # Transform validation data
+        num_val_samples = X_val.shape[0]
+        X_val_flat = X_val.reshape(-1, num_features)
+        X_val_flat_scaled = scaler.transform(X_val_flat)
+        X_val_scaled = X_val_flat_scaled.reshape(num_val_samples, window_size, num_features)
+
+        # Apply data augmentation to training data
+        if AUGMENTATION_LEVEL == 1:
+            noise = np.random.normal(0, 0.01, X_train_scaled.shape)
+            X_train_scaled += noise
+
+        # Compute class weights
+        classes = np.unique(y_train)
+        class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
+        class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+        # Convert to tensors
+        X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.long)
+        X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32)
+        y_val_tensor = torch.tensor(y_val, dtype=torch.long)
+
+        # Create datasets and loaders
+        train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+        val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
+
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                                  num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
+        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
+                                num_workers=NUM_WORKERS, pin_memory=True)
+
+        # Define loss and optimizer
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        scaler = GradScaler()
 
         model.train()
+        best_val_loss = float('inf')
         epochs_no_improve = 0
 
         for epoch in range(NUM_EPOCHS):
@@ -258,6 +248,7 @@ def objective(trial, study):
             train_accuracy = total_correct / total_samples
             avg_train_loss = total_loss / len(train_loader)
 
+            # Validation phase
             model.eval()
             correct = 0
             total = 0
@@ -275,38 +266,49 @@ def objective(trial, study):
             val_accuracy = correct / total
             avg_val_loss = val_loss / len(val_loader)
 
-            print(f"Trial {trial.number + 1}/{NUM_TRIALS}, Fold {fold + 1}/{kfold.get_n_splits(X, y)}, "
-                  f"Epoch {epoch + 1}/{NUM_EPOCHS} | Train Loss: {avg_train_loss:.2f}, Train Acc: {train_accuracy:.2f}, "
-                  f"Val Loss: {avg_val_loss:.2f}, Val Acc: {val_accuracy:.2f}", end="\r")
+            print(f"Trial {trial.number + 1}/{NUM_TRIALS}, Fold {fold + 1}/{kfold.get_n_splits()}, "
+                  f"Epoch {epoch + 1}/{NUM_EPOCHS} | Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
+                  f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}", end="\r")
 
-            if val_accuracy > best_accuracy:
-                best_accuracy = val_accuracy
-                best_model_state = model.state_dict()
+            # Early stopping based on validation loss
+            if avg_val_loss < best_val_loss - OVERFITTING_THRESHOLD:
+                best_val_loss = avg_val_loss
+                best_model_state = copy.deepcopy(model.state_dict())
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
+
+            unique_step = epoch + fold * NUM_EPOCHS
+            trial.report(avg_val_loss, step=unique_step)
+
+            # Handle pruning
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
 
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
                 print(f"\033[93m\nEarly stopping at epoch {epoch + 1}\033[0m")
                 break
 
-        avg_accuracy += best_accuracy
+        avg_accuracy += val_accuracy
 
-    avg_accuracy /= 5
+    avg_accuracy /= 5  # Average over all folds
 
-    try:
-        if not study.best_trial or avg_accuracy > study.best_value:
-            torch.save(best_model_state, f"./data/models/{args.model}_best_model.pth")
-            print(f"New global best model saved for trial {trial.number} with validation accuracy: {avg_accuracy:.2f}")
-    except ValueError:
-        print(f"No completed trials yet. Saving the model for trial {trial.number} with accuracy {avg_accuracy:.2f}")
+    # Save the best model if it's the best so far
+    if trial.number == 0 or avg_accuracy > trial.study.best_value:
         torch.save(best_model_state, f"./data/models/{args.model}_best_model.pth")
+        print(f"\nNew best model saved for trial {trial.number} with average validation accuracy: {avg_accuracy:.4f}")
 
     return avg_accuracy
 
 def main():
-    study = optuna.create_study(direction="maximize", study_name=f"dl_hyperparameter_tuning_{args.model}", storage="sqlite:///data/db.sqlite", load_if_exists=True)
-    study.optimize(lambda trial: objective(trial, study), n_trials=NUM_TRIALS, n_jobs=2)
+    study = optuna.create_study(
+        direction="maximize",
+        study_name=f"dl_hyperparameter_tuning_{args.model}",
+        storage="sqlite:///data/db.sqlite",
+        load_if_exists=True,
+        pruner=optuna.pruners.MedianPruner()
+    )
+    study.optimize(objective, n_trials=NUM_TRIALS, n_jobs=2)
 
-main()
-
+if __name__ == "__main__":
+    main()

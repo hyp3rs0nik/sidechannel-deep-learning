@@ -1,4 +1,3 @@
-# attention_lstm.py
 import torch
 import torch.nn as nn
 
@@ -14,7 +13,7 @@ class AttentionLSTMModel(nn.Module):
         self.fc2 = nn.Linear(64, output_dim)
 
     def forward(self, x):
-        # LSTM processing
+        # x should be of shape (batch_size, seq_len, input_size)
         rnn_out, _ = self.rnn(x)
         attention_weights = torch.softmax(self.attention(rnn_out), dim=1)
         weighted_rnn_out = torch.sum(attention_weights * rnn_out, dim=1)

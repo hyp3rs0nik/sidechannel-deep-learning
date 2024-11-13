@@ -15,10 +15,10 @@ class BehaviorNetModel(nn.Module):
         self.fc2 = nn.Linear(64, output_dim)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)  
+        x = x.permute(0, 2, 1)  # Adjust for Conv1d input
         x = self.pool(self.relu(self.conv1(x)))
         x = self.pool(self.relu(self.conv2(x)))
-        x = x.permute(0, 2, 1)  
+        x = x.permute(0, 2, 1)  # Adjust back for RNN input
         x = x.float()
         rnn_out, _ = self.gru(x)
         attention_weights = torch.softmax(self.attention(rnn_out), dim=1)
@@ -26,5 +26,4 @@ class BehaviorNetModel(nn.Module):
         x = self.relu(self.fc1(weighted_rnn_out))
         x = self.dropout(x)
         x = self.fc2(x)
-        
         return x

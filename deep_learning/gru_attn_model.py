@@ -1,5 +1,5 @@
-import torch.nn as nn
 import torch
+import torch.nn as nn
 
 class AttentionGRUModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, dropout_rate):
