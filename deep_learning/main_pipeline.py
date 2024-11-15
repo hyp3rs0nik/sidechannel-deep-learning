@@ -256,7 +256,7 @@ def log_status(best_accuracy, trial_number, total_trials, fold_number, total_fol
     
     os.system('cls' if os.name == 'nt' else 'clear')
 
-    best_accuracy_str = f"{best_accuracy:.3f}" if isinstance(best_accuracy, float) else best_accuracy
+    best_accuracy_str = f"{color_accuracy(best_accuracy)}" if isinstance(best_accuracy, float) else best_accuracy
 
     train_acc_str = color_accuracy(train_accuracy)
     val_acc_str = color_accuracy(val_accuracy)
@@ -300,7 +300,7 @@ def main():
         try:
             best_accuracy_overall = trial.study.best_value
         except ValueError:
-            best_accuracy_overall = "N/A"
+            best_accuracy_overall = 'N/A'
 
         for fold, (train_idx, val_idx) in enumerate(tscv.split(model_input), 1):
             model = get_model(
