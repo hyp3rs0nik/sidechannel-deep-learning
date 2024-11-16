@@ -1,13 +1,14 @@
+// MainActivity.kt
+
 package com.cap5150.gyroaccel.presentation
 
+import android.app.AlertDialog
 import android.content.Context
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import android.hardware.*
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,7 +19,6 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.material.Button
 import androidx.wear.compose.material.MaterialTheme
@@ -27,18 +27,26 @@ import com.cap5150.gyroaccel.presentation.theme.GyroAccelTheme
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.GZIPOutputStream
 
 class MainActivity : ComponentActivity(), SensorEventListener {
-    private val SERVER_URL = "http://192.168.1.139:3000"
-    private val BATCH_INTERVAL_MS = 1000L
+    private val SERVER_URL = "http://192.168.1.139:3000" // Updated server URL
+    private var BATCH_INTERVAL_MS = 250L // Adjusted batching interval
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
+    private var gyroscope: Sensor? = null
 
     private var latestAccelValues = floatArrayOf(0f, 0f, 0f)
-    private lateinit var accelValues: MutableState<String>
+    private var previousAccelValues = floatArrayOf(0f, 0f, 0f)
+    private var latestGyroValues = floatArrayOf(0f, 0f, 0f)
+    private var previousGyroValues = floatArrayOf(0f, 0f, 0f)
+
     private var isTracking: MutableState<Boolean> = mutableStateOf(false)
+    private val isBufferingData = AtomicBoolean(false)
 
     private val accumulatedSensorData = mutableListOf<String>()
     private val handler = Handler(Looper.getMainLooper())
@@ -47,25 +55,27 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var biasX = 0f
     private var biasY = 0f
     private var biasZ = 0f
-    private val alpha = 0.8f  // Low-pass filter parameter
-    private var smoothedValues = floatArrayOf(0f, 0f, 0f)
+
+    // Time synchronization variables
+    private var timeOffsetMs = 0L
+    private var syncSensorTimeMs: Long = 0L
+    private var syncServerTimeMs: Long = 0L
+    private val syncIntervalMs = 5 * 60 * 1000L // Every 5 minutes
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        accelValues = mutableStateOf("Accel: 0, 0, 0")
-
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         setContent {
-            WearApp(accelValues, isTracking, ::toggleTracking)
+            WearApp(isTracking, ::toggleTracking)
         }
 
-        // Perform sensor calibration at startup
-        calibrateSensor()
+        startCalibration()
     }
 
     private fun toggleTracking() {
@@ -78,9 +88,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private fun startTracking() {
         isTracking.value = true
+        val desiredSamplingRateUs = (1_000_000 / 200) // 200 Hz
+
         accelerometer?.also { sensor ->
-            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST)
+            sensorManager.registerListener(this, sensor, desiredSamplingRateUs)
         }
+        gyroscope?.also { sensor ->
+            sensorManager.registerListener(this, sensor, desiredSamplingRateUs)
+        }
+
+        synchronizeTimeWithServer()
+        scheduleTimeSynchronization()
         handler.postDelayed(object : Runnable {
             override fun run() {
                 if (isTracking.value) {
@@ -89,6 +107,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 }
             }
         }, BATCH_INTERVAL_MS)
+    }
+
+    private fun scheduleTimeSynchronization() {
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                if (isTracking.value) {
+                    synchronizeTimeWithServer()
+                    handler.postDelayed(this, syncIntervalMs)
+                }
+            }
+        }, syncIntervalMs)
     }
 
     private fun stopTracking() {
@@ -100,96 +129,198 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onSensorChanged(event: SensorEvent?) {
         if (isTracking.value) {
             event?.let { eventData ->
-                if (eventData.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-                    val (x, y, z) = eventData.values
+                val adjustedTimestamp = getAdjustedTimestamp(eventData.timestamp)
 
-                    // Apply calibration
-                    val correctedValues = applyBiasRemoval(x, y, z)
-                    val gravityCompensatedZ = applyGravityCompensation(correctedValues[2])
-                    val smoothedAccelValues = applyLowPassFilter(floatArrayOf(correctedValues[0], correctedValues[1], gravityCompensatedZ))
+                when (eventData.sensor.type) {
+                    Sensor.TYPE_LINEAR_ACCELERATION -> {
+                        val (x, y, z) = eventData.values
 
-                    accelValues.value = String.format(Locale.US, "Accel: %.3f, %.3f, %.3f", smoothedAccelValues[0], smoothedAccelValues[1], smoothedAccelValues[2])
-                    latestAccelValues = smoothedAccelValues
+                        val correctedValues = applyBiasRemoval(x, y, z)
+                        val filteredValues = applyLowPassFilter(correctedValues, previousAccelValues, alpha = 0.8f)
+                        previousAccelValues = filteredValues.copyOf()
 
-                    accumulateSensorData(smoothedAccelValues[0], smoothedAccelValues[1], smoothedAccelValues[2])
+                        latestAccelValues = filteredValues
+                    }
+                    Sensor.TYPE_GYROSCOPE -> {
+                        val (x, y, z) = eventData.values
+
+                        val filteredValues = applyLowPassFilter(eventData.values, previousGyroValues, alpha = 0.8f)
+                        previousGyroValues = filteredValues.copyOf()
+
+                        latestGyroValues = filteredValues
+                    }
                 }
+
+                accumulateSensorData(adjustedTimestamp)
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun accumulateSensorData(x: Float, y: Float, z: Float) {
-        val timestamp = System.currentTimeMillis()
-        val data = "$timestamp, $x, $y, $z"
-        accumulatedSensorData.add(data)
+    private fun accumulateSensorData(timestamp: Long) {
+        val dataMap = mapOf(
+            "timestamp" to timestamp,
+            "accel_x" to latestAccelValues[0],
+            "accel_y" to latestAccelValues[1],
+            "accel_z" to latestAccelValues[2],
+            "gyro_x" to latestGyroValues[0],
+            "gyro_y" to latestGyroValues[1],
+            "gyro_z" to latestGyroValues[2],
+        )
+        val dataJson = JSONObject(dataMap).toString()
+        accumulatedSensorData.add(dataJson)
     }
 
     private fun sendBatchedDataToServer() {
-        if (accumulatedSensorData.isNotEmpty()) {
-            val dataToSend = accumulatedSensorData.joinToString(separator = "\n") {
-                it.replace(", ", ",")
-            }
+        if (isBufferingData.get()) return
 
+        if (accumulatedSensorData.isNotEmpty()) {
+            isBufferingData.set(true)
+            val dataToSend = accumulatedSensorData.joinToString(separator = "\n")
             accumulatedSensorData.clear()
 
+            // Compress the data
+            val compressedData = compressData(dataToSend)
+
             val client = OkHttpClient()
-            val body: RequestBody = dataToSend.toRequestBody("text/csv".toMediaType())
+            val body: RequestBody = compressedData.toRequestBody("application/octet-stream".toMediaType())
             val request = Request.Builder()
                 .url("$SERVER_URL/sensor_data")
                 .post(body)
+                .addHeader("Content-Encoding", "gzip")
                 .build()
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
                     println("Failed to send batched data: ${e.message}")
+                    // Handle network failure, buffer data for retry
+                    accumulatedSensorData.add(dataToSend)
+                    isBufferingData.set(false)
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    if (!response.isSuccessful) throw IOException("Unexpected code $response")
-                    println("Batched data response received: ${response.body?.string()}")
+                    if (!response.isSuccessful) {
+                        println("Unexpected response code: ${response.code}")
+                        // Handle unsuccessful response, buffer data for retry
+                        accumulatedSensorData.add(dataToSend)
+                    }
+                    isBufferingData.set(false)
                 }
             })
         }
     }
 
+    private fun compressData(data: String): ByteArray {
+        val outputStream = ByteArrayOutputStream()
+        GZIPOutputStream(outputStream).use { it.write(data.toByteArray(Charsets.UTF_8)) }
+        return outputStream.toByteArray()
+    }
+
     // Calibration methods
-    private fun calibrateSensor() {
-        val stationaryData = mutableListOf<FloatArray>()
-        repeat(100) {  // Collect data 100 times
-            stationaryData.add(latestAccelValues)
-            Thread.sleep(10)  // Pause briefly between readings
+    private fun startCalibration() {
+        val builder = AlertDialog.Builder(this)
+        builder.setTitle("Calibration")
+        builder.setMessage("Place the device on a stable surface and tap OK to start calibration.")
+        builder.setCancelable(false)
+        builder.setPositiveButton("OK") { dialog, _ ->
+            dialog.dismiss()
+            performCalibration()
         }
+        val dialog = builder.create()
+        dialog.show()
+    }
 
-        val sumX = stationaryData.sumOf { it[0].toDouble() }
-        val sumY = stationaryData.sumOf { it[1].toDouble() }
-        val sumZ = stationaryData.sumOf { it[2].toDouble() }
+    private fun performCalibration() {
+        val calibrationData = mutableListOf<FloatArray>()
+        val calibrationSamples = 500 // Increased samples for better accuracy
 
-        biasX = (sumX / stationaryData.size).toFloat()
-        biasY = (sumY / stationaryData.size).toFloat()
-        biasZ = (sumZ / stationaryData.size).toFloat()
+        sensorManager.registerListener(object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                event?.let {
+                    if (it.sensor.type == Sensor.TYPE_LINEAR_ACCELERATION) {
+                        calibrationData.add(it.values.clone())
+                        if (calibrationData.size >= calibrationSamples) {
+                            sensorManager.unregisterListener(this)
+                            computeCalibrationBias(calibrationData)
+                        }
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }, accelerometer, SensorManager.SENSOR_DELAY_FASTEST)
+    }
+
+    private fun computeCalibrationBias(calibrationData: List<FloatArray>) {
+        val sumX = calibrationData.sumOf { it[0].toDouble() }
+        val sumY = calibrationData.sumOf { it[1].toDouble() }
+        val sumZ = calibrationData.sumOf { it[2].toDouble() }
+
+        biasX = (sumX / calibrationData.size).toFloat()
+        biasY = (sumY / calibrationData.size).toFloat()
+        biasZ = (sumZ / calibrationData.size).toFloat()
     }
 
     private fun applyBiasRemoval(x: Float, y: Float, z: Float): FloatArray {
         return floatArrayOf(x - biasX, y - biasY, z - biasZ)
     }
 
-    private fun applyGravityCompensation(z: Float): Float {
-        val gravity = 9.81f  // Gravity constant
-        return z - gravity
+    private fun applyLowPassFilter(
+        currentValues: FloatArray,
+        previousValues: FloatArray,
+        alpha: Float
+    ): FloatArray {
+        val filteredValues = FloatArray(3)
+        for (i in 0..2) {
+            filteredValues[i] = alpha * currentValues[i] + (1 - alpha) * previousValues[i]
+        }
+        return filteredValues
     }
 
-    private fun applyLowPassFilter(newValues: FloatArray): FloatArray {
-        smoothedValues[0] = alpha * smoothedValues[0] + (1 - alpha) * newValues[0]
-        smoothedValues[1] = alpha * smoothedValues[1] + (1 - alpha) * newValues[1]
-        smoothedValues[2] = alpha * smoothedValues[2] + (1 - alpha) * newValues[2]
-        return smoothedValues
+    // Time synchronization methods
+    private fun synchronizeTimeWithServer() {
+        val client = OkHttpClient()
+        val request = Request.Builder()
+            .url("$SERVER_URL/server_time")
+            .get()
+            .build()
+
+        val t0 = SystemClock.elapsedRealtimeNanos() / 1_000_000
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                println("Failed to synchronize time: ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val t3 = SystemClock.elapsedRealtimeNanos() / 1_000_000
+                if (response.isSuccessful) {
+                    val serverTimeJson = response.body?.string()
+                    val serverTimeObject = JSONObject(serverTimeJson)
+                    val t1 = serverTimeObject.getLong("timestamp")
+                    val rtt = t3 - t0
+                    val offset = t1 - t3 + rtt / 2
+                    syncSensorTimeMs = t3
+                    syncServerTimeMs = t1 + rtt / 2
+                    timeOffsetMs = offset
+                    println("Time offset calculated: $timeOffsetMs ms")
+                }
+            }
+        })
+    }
+
+    private fun getAdjustedTimestamp(sensorTimestampNs: Long): Long {
+        val sensorTimeMs = sensorTimestampNs / 1_000_000 // Convert to milliseconds
+        val elapsedTimeSinceSyncMs = sensorTimeMs - syncSensorTimeMs
+        val adjustedTimestamp = syncServerTimeMs + elapsedTimeSinceSyncMs
+        return adjustedTimestamp
     }
 }
 
+
 @Composable
 fun WearApp(
-    accelValues: MutableState<String>,
     isTracking: MutableState<Boolean>,
     onToggleTracking: () -> Unit
 ) {
@@ -213,3 +344,4 @@ fun WearApp(
         }
     }
 }
+

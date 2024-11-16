@@ -1,3 +1,5 @@
+// script.js
+
 const digits = [...Array(10).keys()].map(String);
 const groupSize = 100;
 const sequenceLength = 5;
@@ -19,6 +21,8 @@ const typingArea = document.getElementById("typing-area");
 const progressBar = document.getElementById("progress-bar");
 const statusDiv = document.getElementById("status");
 
+const syncIntervalMs = 5 * 60 * 1000; // Every 5 minutes
+
 roundButtons.forEach((button) => {
   button.addEventListener("click", () => {
     if (isTaskRunning) return;
@@ -39,21 +43,29 @@ async function selectRound(rounds, button) {
   button.classList.add("selected");
 
   await synchronizeTime();
+  startSynchronization();
   generateSequences();
   displayCurrentSequence();
 }
 
 async function synchronizeTime() {
   try {
+    const t0 = Date.now();
     const response = await fetch(`${SERVER_URL}/server_time`);
+    const t3 = Date.now();
     const serverTime = await response.json();
-    const clientTime = performance.now();
-    timeOffset = serverTime.timestamp - clientTime;
+    const t1 = serverTime.timestamp;
+    const rtt = t3 - t0;
+    timeOffset = t1 - t3 + rtt / 2;
     console.log(`Time offset calculated: ${timeOffset} ms`);
   } catch (error) {
     console.error("Error synchronizing time:", error);
     alert("Unable to synchronize time with the server.");
   }
+}
+
+function startSynchronization() {
+  setInterval(synchronizeTime, syncIntervalMs);
 }
 
 function generateSequences() {
@@ -146,22 +158,16 @@ function updateProgressBar() {
 function recordKeystroke(event) {
   if (!isTaskRunning) return;
 
-  const rawTimestamp = performance.now();
+  const rawTimestamp = Date.now();
   const timestamp = rawTimestamp + timeOffset;
   const key = event.key;
   const eventType = event.type;
-  const cursorPosition = typingArea.selectionStart;
-  const inputValue = typingArea.value;
 
   if (digits.includes(key) || key === "Backspace" || key === "Enter") {
     typedData.push({
-      sequenceIndex: currentSequenceIndex,
-      sequence: sequences[currentSequenceIndex],
-      key,
       timestamp,
-      eventType,
-      cursorPosition,
-      inputValue,
+      key,
+      sequenceIndex: currentSequenceIndex,
     });
   } else {
     event.preventDefault();
@@ -235,4 +241,7 @@ document.addEventListener("DOMContentLoaded", () => {
   typingArea.setAttribute("autocorrect", "off");
   typingArea.setAttribute("autocapitalize", "off");
   typingArea.setAttribute("spellcheck", "false");
+
+  synchronizeTime(); // Initial synchronization
+  startSynchronization(); // Periodic resynchronization
 });

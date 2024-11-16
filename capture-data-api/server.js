@@ -1,3 +1,5 @@
+// server.js
+
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -13,7 +15,7 @@ app.use(bodyParser.json({ limit: "10mb" }));
 
 const connectWithRetry = async () => {
   try {
-    await mongoose.connect("mongodb://localhost:27017/v1", {
+    await mongoose.connect("mongodb://localhost:27017/v2", {
       maxPoolSize: 10,
     });
     console.log("Connected to MongoDB.");
@@ -40,12 +42,8 @@ const Sensor = model("Sensor", sensorSchema);
 
 const keystrokeSchema = new Schema({
   sequenceIndex: { type: Number, required: true },
-  sequence: { type: [String], required: true },
   key: { type: String, required: true },
   timestamp: { type: Number, required: true },
-  eventType: { type: String, required: true },
-  cursorPosition: { type: Number, required: true },
-  inputValue: { type: String, required: true },
 });
 
 keystrokeSchema.index({ timestamp: 1 });
@@ -58,7 +56,7 @@ const bulkInsertSensorData = async (docs) => {
     await Sensor.insertMany(docs, { ordered: false });
     console.log(`${docs.length} sensor records inserted.`);
   } catch (err) {
-    console.error('Error inserting sensor data:', err);
+    console.error("Error inserting sensor data:", err);
   }
 };
 
@@ -128,12 +126,8 @@ app.post("/keystroke_data", async (req, res) => {
 
     const keystrokeDocs = keystrokeData.map((data) => ({
       sequenceIndex: data.sequenceIndex,
-      sequence: data.sequence,
       key: data.key,
       timestamp: data.timestamp,
-      eventType: data.eventType,
-      cursorPosition: data.cursorPosition,
-      inputValue: data.inputValue,
     }));
 
     await bulkInsertKeystrokeData(keystrokeDocs);
