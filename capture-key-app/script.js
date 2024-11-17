@@ -150,18 +150,12 @@ function recordKeystroke(event) {
   const timestamp = rawTimestamp + timeOffset;
   const key = event.key;
   const eventType = event.type;
-  const cursorPosition = typingArea.selectionStart;
-  const inputValue = typingArea.value;
 
   if (digits.includes(key) || key === "Backspace" || key === "Enter") {
     typedData.push({
-      sequenceIndex: currentSequenceIndex,
-      sequence: sequences[currentSequenceIndex],
-      key,
       timestamp,
-      eventType,
-      cursorPosition,
-      inputValue,
+      key,
+      sequenceIndex: currentSequenceIndex,
     });
   } else {
     event.preventDefault();
