@@ -12,12 +12,10 @@ import torch.backends.cudnn as cudnn
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import confusion_matrix, classification_report
 from torch.utils.data import DataLoader, Dataset
-from torch.cuda.amp import autocast, GradScaler
 
 from behaveformer_model import BehaviorNetModel
 from gru_attn_model import AttentionGRUModel
@@ -36,10 +34,10 @@ NUM_EPOCHS = 100
 BATCH_SIZE = 32
 EARLY_STOPPING_PATIENCE = 10
 MIN_EPOCHS = 20
-NUM_WORKERS = 12
+NUM_WORKERS = 4  # Adjust based on your system
 WINDOW_SIZE = 64
 OVERFITTING_THRESHOLD = 0.0001
-AUGMENTATION_LEVEL = 2
+AUGMENTATION_LEVEL = 1
 STRIDE = 16
 
 def seed_everything(seed=42):
@@ -145,12 +143,11 @@ def get_model(model_type, input_dim, hidden_dim, output_dim, num_layers, dropout
         raise ValueError("Invalid model type selected.")
 
 class SensorDataset(Dataset):
-    def __init__(self, sequences, labels, scaler=None, augment=False, noise_intensity=0.01):
+    def __init__(self, sequences, labels, augment=False, noise_intensity=0.01):
         self.sequences = sequences
         self.labels = labels
         self.augment = augment
         self.noise_intensity = noise_intensity
-        self.scaler = scaler
 
     def __len__(self):
         return len(self.labels)
@@ -158,18 +155,15 @@ class SensorDataset(Dataset):
     def __getitem__(self, idx):
         sequence = self.sequences[idx]
         label = self.labels[idx]
-        sequence = self.scaler.transform(sequence)
-        if self.augment:
-            noise = np.random.normal(0, self.noise_intensity, sequence.shape)
-            sequence += noise
-            scale_factor = np.random.uniform(0.9, 1.1)
-            sequence *= scale_factor
         sequence = torch.tensor(sequence, dtype=torch.float32)
+        if self.augment:
+            noise = torch.randn_like(sequence) * self.noise_intensity
+            scale_factor = torch.empty(1).uniform_(0.9, 1.1)
+            sequence = sequence * scale_factor + noise
         label = torch.tensor(label, dtype=torch.long)
         return sequence, label
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, patience):
-    scaler_amp = GradScaler()
     best_val_loss = float('inf')
     epochs_no_improve = 0
     best_model_wts = model.state_dict()
@@ -190,12 +184,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         for batch_X, batch_y in train_loader:
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
             optimizer.zero_grad()
-            with autocast():
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
-            scaler_amp.scale(loss).backward()
-            scaler_amp.step(optimizer)
-            scaler_amp.update()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
             total_loss += loss.item()
             _, predicted = torch.max(outputs, 1)
             total_correct += (predicted == batch_y).sum().item()
@@ -227,11 +219,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         else:
             epochs_no_improve += 1
 
-        timer.end_epoch()
+        avg_epoch_train_time = timer.end_epoch()
 
         if epoch >= MIN_EPOCHS and epochs_no_improve >= patience:
             model.load_state_dict(best_model_wts)
             break
+
     average_time = timer.get_average_time()
     return model, early_stopping_epoch, last_train_accuracy, last_train_loss, last_val_accuracy, last_val_loss, average_time
 
@@ -239,21 +232,21 @@ def color_accuracy(acc):
     if isinstance(acc, str):
         return acc
     if acc < 0.40:
-        color = '\033[91m'  
+        color = '\033[91m'  # Red
     elif acc < 0.55:
-        color = '\033[93m'  
+        color = '\033[33m'  # Orange (using ANSI code for yellow)
     elif acc < 0.65:
-        color = '\033[93m'  
+        color = '\033[93m'  # Yellow
     else:
-        color = '\033[92m'  
+        color = '\033[92m'  # Green
     return f"{color}{acc:.3f}\033[0m"
 
 def log_status(best_accuracy, trial_number, total_trials, fold_number, total_folds,
                train_accuracy, train_loss, val_loss, val_accuracy, avg_epoch_train_time,
                early_stopping_info=None):
-    
-    line_length = 69
-    
+    line_length = 80
+
+    # Remove console clearing to reduce overhead
     os.system('cls' if os.name == 'nt' else 'clear')
 
     best_accuracy_str = f"{color_accuracy(best_accuracy)}" if isinstance(best_accuracy, float) else best_accuracy
@@ -261,19 +254,19 @@ def log_status(best_accuracy, trial_number, total_trials, fold_number, total_fol
     train_acc_str = color_accuracy(train_accuracy)
     val_acc_str = color_accuracy(val_accuracy)
 
-    print('='* line_length)
-    print(f"Best is {best_accuracy_str}, Avg Epoch Trial Time: {avg_epoch_train_time:.3f}s"),
-    print('='* line_length)
+    print('=' * line_length)
+    print(f"Best Accuracy: {best_accuracy_str}, Avg Epoch Time: {avg_epoch_train_time:.3f}s")
+    print('=' * line_length)
     print(f"Trial {trial_number}/{total_trials}, Fold {fold_number}/{total_folds}")
-    print(f"Train Acc: {train_acc_str}, Train Loss: {train_loss:.3f}, Val Loss: {val_loss:.3f}, Val Acc: {val_acc_str}")
-    print('='* line_length)
+    print(f"Train Acc: {train_acc_str}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc_str}")
+    print('=' * line_length)
     if early_stopping_info:
-        print(f"Recent Early Stopping: {early_stopping_info}")
-        print('='* line_length)
+        print(f"Early Stopping Info: {early_stopping_info}")
+        print('=' * line_length)
 
 def main():
-    keys_df = pd.read_csv("./data/training/keys.csv")
-    sensor_df = pd.read_csv("./data/training/sensor_v2_denoise_2.25hz.csv")
+    keys_df = pd.read_csv("./data/training/clean_v3.keystrokes.csv")
+    sensor_df = pd.read_csv("./data/training/clean_v3.sensors.csv")
 
     sensor_sequences, labels = generate_samples(
         sensor_df, keys_df, WINDOW_SIZE, STRIDE
@@ -281,6 +274,12 @@ def main():
 
     num_features = sensor_sequences.shape[2]
     model_input = sensor_sequences
+
+    # Precompute normalization
+    model_input_flat = model_input.reshape(-1, num_features)
+    mean = model_input_flat.mean(axis=0)
+    std = model_input_flat.std(axis=0)
+    model_input_normalized = (model_input - mean) / std
 
     total_trials = NUM_TRIALS
 
@@ -292,36 +291,30 @@ def main():
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
         noise_intensity = trial.suggest_float("noise_intensity", 0.005, 0.02)
 
-        tscv = TimeSeriesSplit(n_splits=5)
+        kf = KFold(n_splits=3, shuffle=True, random_state=42)
         avg_accuracy = 0
-        total_folds = tscv.get_n_splits()
+        total_folds = kf.get_n_splits()
 
-        
         try:
             best_accuracy_overall = trial.study.best_value
         except ValueError:
             best_accuracy_overall = 'N/A'
 
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(model_input), 1):
+        for fold, (train_idx, val_idx) in enumerate(kf.split(model_input_normalized), 1):
             model = get_model(
                 args.model, num_features, hidden_dim,
                 11, num_layers, dropout_rate
             ).to(device)
 
-            X_train = model_input[train_idx]
+            X_train = model_input_normalized[train_idx]
             y_train = labels[train_idx]
-            X_val = model_input[val_idx]
+            X_val = model_input_normalized[val_idx]
             y_val = labels[val_idx]
 
-            scaler = StandardScaler()
-            num_samples, window_size, num_features_input = X_train.shape
-            X_train_flat = X_train.reshape(-1, num_features_input)
-            scaler.fit(X_train_flat)
+            train_dataset = SensorDataset(X_train, y_train, augment=False)
+            val_dataset = SensorDataset(X_val, y_val, augment=False)
 
-            train_dataset = SensorDataset(X_train, y_train, scaler=scaler, augment=True, noise_intensity=noise_intensity)
-            val_dataset = SensorDataset(X_val, y_val, scaler=scaler, augment=False)
-
-            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                                       num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
             val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                                     num_workers=NUM_WORKERS, pin_memory=True)
@@ -341,6 +334,7 @@ def main():
 
             early_stopping_info = f"Trial {trial.number+1}, Epoch {early_stopping_epoch} at {last_val_accuracy:.3f}"
 
+            # Call log_status after each fold
             log_status(best_accuracy_overall, trial.number+1, total_trials, fold, total_folds,
                        last_train_accuracy, last_train_loss, last_val_loss, last_val_accuracy,
                        avg_epoch_train_time, early_stopping_info=early_stopping_info)
@@ -367,17 +361,13 @@ def main():
         11, num_layers, dropout_rate
     ).to(device)
 
-    scaler = StandardScaler()
-    num_samples, window_size, num_features_input = model_input.shape
-    model_input_flat = model_input.reshape(-1, num_features_input)
-    scaler.fit(model_input_flat)
-
-    full_dataset = SensorDataset(model_input, labels, scaler=scaler, augment=True, noise_intensity=noise_intensity)
+    # Use the normalized data
+    full_dataset = SensorDataset(model_input_normalized, labels, augment=True, noise_intensity=noise_intensity)
     train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=NUM_WORKERS, pin_memory=True)
@@ -389,7 +379,7 @@ def main():
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    model, _, _, _, _, _ = train_model(model, train_loader, val_loader, criterion, optimizer, NUM_EPOCHS, EARLY_STOPPING_PATIENCE)
+    model, _, _, _, _, _, _ = train_model(model, train_loader, val_loader, criterion, optimizer, NUM_EPOCHS, EARLY_STOPPING_PATIENCE)
 
     unseen_keys_df = pd.read_csv("./data/unseen/keys.csv")
     unseen_sensor_df = pd.read_csv("./data/unseen/sensors.csv")
@@ -398,7 +388,10 @@ def main():
         unseen_sensor_df, unseen_keys_df, WINDOW_SIZE, STRIDE
     )
 
-    unseen_dataset = SensorDataset(unseen_sequences, unseen_labels, scaler=scaler, augment=False)
+    # Normalize the unseen data using training mean and std
+    unseen_sequences_normalized = (unseen_sequences - mean) / std
+
+    unseen_dataset = SensorDataset(unseen_sequences_normalized, unseen_labels, augment=False)
     unseen_loader = DataLoader(unseen_dataset, batch_size=BATCH_SIZE, shuffle=False,
                                num_workers=NUM_WORKERS, pin_memory=True)
 
