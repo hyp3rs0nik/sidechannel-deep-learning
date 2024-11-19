@@ -163,7 +163,8 @@ function recordKeystroke(event) {
   const key = event.key;
   const eventType = event.type;
 
-  if (digits.includes(key) || key === "Backspace" || key === "Enter") {
+  // Allow only digits and Backspace
+  if (digits.includes(key) || key === "Backspace") {
     typedData.push({
       timestamp,
       key,
@@ -180,14 +181,16 @@ function recordKeystroke(event) {
         currentInputPosition--;
       }
     } else if (digits.includes(key)) {
-      currentInputPosition++;
+      if (currentInputPosition < sequenceLength) {
+        currentInputPosition++;
+      } else {
+        // Prevent further input if sequence length is reached
+        event.preventDefault();
+        return;
+      }
     }
 
-    if (currentInputPosition < 0) {
-      currentInputPosition = 0;
-    }
-
-    if (key === "Enter" && currentInputPosition >= sequenceLength) {
+    if (currentInputPosition === sequenceLength) {
       typingArea.disabled = true;
       setTimeout(() => {
         currentSequenceIndex++;
@@ -196,7 +199,6 @@ function recordKeystroke(event) {
     }
   }
 }
-
 function endTask() {
   isTaskRunning = false;
   typingArea.disabled = true;
