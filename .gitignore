@@ -13,7 +13,7 @@ checkpoints/
 *.db
 catboost_info/
 *.sqlite
-
+milruns/
 
 # Node.js specific
 node_modules/
