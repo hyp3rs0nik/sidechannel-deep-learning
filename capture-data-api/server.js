@@ -36,6 +36,14 @@ const sensorSchema = new Schema({
   gyro_z: { type: Number, required: true },
 });
 
+const trialSchema = new mongoose.Schema({
+  trial_number: Number,
+  value: Number,
+  params: Object
+});
+
+const Trial = mongoose.model('Trial', trialSchema);
+
 sensorSchema.index({ timestamp: 1 });
 
 const Sensor = model("Sensor", sensorSchema);
