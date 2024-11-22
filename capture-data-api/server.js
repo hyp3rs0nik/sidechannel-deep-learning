@@ -70,6 +70,21 @@ const bulkInsertKeystrokeData = async (docs) => {
   }
 };
 
+app.put('/best_study', async (req, res) => {
+  try {
+    const { trial_number, value, params } = req.body;
+    const result = await Trial.findOneAndUpdate(
+      {},
+      { trial_number, value, params },
+      { upsert: true, new: true }
+    );
+    res.status(200).send('Trial data replaced successfully.');
+  } catch (error) {
+    console.error('Error updating trial data:', error);
+    res.status(500).send('Failed to update trial data.');
+  }
+})
+
 app.get("/server_time", (req, res) => {
   const serverTime = Date.now();
   res.json({ timestamp: serverTime });

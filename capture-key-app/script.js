@@ -71,45 +71,50 @@ function startSynchronization() {
 function generateSequences() {
   sequences = [];
 
-  for (let group = 0; group < totalRounds; group++) {
-    let digitPool = [];
-    for (let i = 0; i < 10; i++) {
-      for (let d = 0; d < 10; d++) {
-        digitPool.push(String(d));
-      }
-    }
+  const totalSequences = totalRounds * sequencesPerGroup;
+  const totalDigits = totalSequences * sequenceLength;
+  const digitsPerDigit = totalDigits / 10;
 
-    digitPool = shuffleArray(digitPool);
+  if (totalDigits % 10 !== 0) {
+    alert("Total number of digits is not a multiple of 10. Cannot ensure equal distribution.");
+    return;
+  }
 
-    let groupDigits = [];
-    while (digitPool.length > 0) {
-      let digit = digitPool.pop();
-
-      if (
-        groupDigits.length > 0 &&
-        digit === groupDigits[groupDigits.length - 1]
-      ) {
-        let swapIndex = findNonRepeatingDigitIndex(digitPool, digit);
-        if (swapIndex !== -1) {
-          [digitPool[swapIndex], digit] = [digit, digitPool[swapIndex]];
-          groupDigits.push(digit);
-        } else {
-          groupDigits.push(digit);
-        }
-      } else {
-        groupDigits.push(digit);
-      }
-    }
-
-    for (let i = 0; i < sequencesPerGroup; i++) {
-      let sequence = groupDigits.slice(
-        i * sequenceLength,
-        (i + 1) * sequenceLength
-      );
-      sequences.push(sequence);
+  let digitPool = [];
+  for (let i = 0; i < 10; i++) {
+    for (let j = 0; j < digitsPerDigit; j++) {
+      digitPool.push(String(i));
     }
   }
+
+  digitPool = shuffleArray(digitPool);
+
+  let allDigits = [];
+  while (digitPool.length > 0) {
+    let digit = digitPool.pop();
+
+    if (
+      allDigits.length > 0 &&
+      digit === allDigits[allDigits.length - 1]
+    ) {
+      let swapIndex = findNonRepeatingDigitIndex(digitPool, digit);
+      if (swapIndex !== -1) {
+        [digitPool[swapIndex], digit] = [digit, digitPool[swapIndex]];
+        allDigits.push(digit);
+      } else {
+        allDigits.push(digit);
+      }
+    } else {
+      allDigits.push(digit); 
+    }
+  }
+
+  for (let i = 0; i < allDigits.length; i += sequenceLength) {
+    let sequence = allDigits.slice(i, i + sequenceLength);
+    sequences.push(sequence);
+  }
 }
+
 
 function findNonRepeatingDigitIndex(digitPool, currentDigit) {
   for (let i = digitPool.length - 1; i >= 0; i--) {
