@@ -22,12 +22,13 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 executor = ThreadPoolExecutor(max_workers=1)
 
-def send_best_trial_to_server(study, trial):
+def send_best_trial_to_server(study, trial, model):
     if study.best_trial.number == trial.number:
         def send_request():
             url = 'http://192.168.1.139:3000/best_study'
             headers = {'Content-Type': 'application/json'}
             data = {
+                'model': model,
                 'trial_number': trial.number,
                 'value': trial.value,
                 'params': trial.params
@@ -213,7 +214,11 @@ def train_and_save_model(args, model_dir, model_path, label_encoder_path):
 
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(direction='maximize', pruner=pruner)
-    study.optimize(objective, n_trials=args.num_trials, callbacks=[send_best_trial_to_server])
+    study.optimize(
+        objective,
+        n_trials=args.num_trials,
+        callbacks=[lambda study, trial: send_best_trial_to_server(study, trial, args.model)]
+    )
 
     print('Best hyperparameters:', study.best_params)
 
