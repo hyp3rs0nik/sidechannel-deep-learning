@@ -6,6 +6,11 @@ const cors = require("cors");
 const morgan = require("morgan");
 const zlib = require("zlib");
 const bodyParser = require("body-parser");
+const fs = require('fs');
+const path = require('path');
+
+const version = process.argv[2] || '6';
+
 const { Schema, model, connection } = mongoose;
 
 const app = express();
@@ -15,7 +20,7 @@ app.use(bodyParser.json({ limit: "10mb" }));
 
 const connectWithRetry = async () => {
   try {
-    await mongoose.connect("mongodb://localhost:27017/v2", {
+    await mongoose.connect(`mongodb://localhost:27017/v${version}`, {
       maxPoolSize: 10,
     });
     console.log("Connected to MongoDB.");
@@ -37,6 +42,7 @@ const sensorSchema = new Schema({
 });
 
 const trialSchema = new mongoose.Schema({
+  model: String,
   trial_number: Number,
   value: Number,
   params: Object
@@ -78,12 +84,43 @@ const bulkInsertKeystrokeData = async (docs) => {
   }
 };
 
+app.get('/best_study', async (req, res) => {
+  try {
+    const trial = await Trial.findOne({});
+    if (!trial) {
+      res.status(404).send('<h1>No trial data found</h1>');
+      return;
+    }
+
+    const filePath = path.join(__dirname, 'report.html');
+    fs.readFile(filePath, 'utf8', (err, html) => {
+      if (err) {
+        console.error('Error reading HTML file:', err);
+        res.status(500).send('<h1>Internal Server Error</h1>');
+        return;
+      }
+
+      // Replace placeholders with actual values
+      const renderedHtml = html
+        .replace('{{model}}', trial.model)
+        .replace('{{trial_number}}', trial.trial_number)
+        .replace('{{value}}', trial.value);
+
+      // Send the rendered HTML
+      res.status(200).send(renderedHtml);
+    });
+  } catch (error) {
+    console.error('Error retrieving trial data:', error);
+    res.status(500).send('<h1>Internal Server Error</h1>');
+  }
+});
+
 app.put('/best_study', async (req, res) => {
   try {
-    const { trial_number, value, params } = req.body;
-    const result = await Trial.findOneAndUpdate(
+    const { trial_number, value, params, model } = req.body;
+    await Trial.findOneAndUpdate(
       {},
-      { trial_number, value, params },
+      { trial_number, value, params, model },
       { upsert: true, new: true }
     );
     res.status(200).send('Trial data replaced successfully.');

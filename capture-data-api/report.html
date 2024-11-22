@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Best Trial</title>
+  <style>
+    /* Reset some default styles */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: 'Arial', sans-serif;
+      background-color: #121212; /* Dark background */
+      color: #ffffff; /* Light text color */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh; /* Fit the entire viewport height */
+    }
+    .container {
+      width: 90%;
+      max-width: 500px;
+      padding: 20px;
+      background: #1e1e1e; /* Slightly lighter dark for contrast */
+      border-radius: 12px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5); /* Subtle shadow */
+      text-align: center;
+    }
+    .heading {
+      font-size: 1.8rem;
+      margin-bottom: 20px;
+      color: #4caf50; /* Accent color for heading */
+    }
+    .data {
+      font-size: 1.2rem;
+      margin: 10px 0;
+    }
+    .data span {
+      font-weight: bold;
+      color: #ff9800; /* Accent color for data */
+    }
+    @media (max-width: 600px) {
+      .heading {
+        font-size: 1.5rem;
+      }
+      .data {
+        font-size: 1rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="heading">Best Trial</div>
+    <div class="data">Model: <span>{{model}}</span></div>
+    <div class="data">Trial <span>{{trial_number}}</span>, Value: <span>{{value}}</span></div>
+  </div>
+  <script>
+    // reload this page every 2 mins
+    setTimeout(() => {
+      location.reload();
+    }, 120000);
+  </script>
+</body>
+</html>
