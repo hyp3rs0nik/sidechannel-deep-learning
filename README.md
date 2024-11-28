@@ -40,3 +40,8 @@ Evaluate the trained model on test data:
 ## Models
 Trained model: Saved as tuned_<model_type>_raw_sensor.pth in ./data/models.
 Label encoder: Saved as label_encoder.pkl for consistent label mapping.
+
+## Tools
+- capture-key-app is the number typing task (html/javascript sequence generator)
+- capture-sensor-app motion sensor capture app (kotlin/android) 
+- capture-data-api node server that saves the motion sensor streamed by watch app and keys by the sequence generator
