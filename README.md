@@ -1,8 +1,8 @@
-#Deep Learning Model for Keystroke Prediction using Motion Sensors
-##Overview
+# Deep Learning Model for Keystroke Prediction using Motion Sensors
+## Overview
 This project predicts keystrokes using motion sensor data (accelerometer and gyroscope). It employs deep learning models (CNN, LSTM, GRU) for time-series classification. Hyperparameter tuning is facilitated by Optuna, and cross-validation ensures model robustness.
 
-##Features
+## Features
 - Input: Sensor data (accelerometer, gyroscope) and timestamps of keystrokes.
 - Models: CNN, LSTM, GRU with customizable architecture.
 - Optimization: Hyperparameter tuning using Optuna.
