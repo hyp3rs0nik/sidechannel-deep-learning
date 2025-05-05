@@ -1,4 +1,4 @@
-# Side-Channel Keystroke Inference via Acoustic & Motion Sensor Data
+# Side-Channel Keystroke Inference via Motion Sensor Data
 
 A research prototype and end-to-end implementation for inferring keyboard input smartwatch motion sensors. This repository contains data-capture tools, preprocessing pipelines, machine-learning baselines, and deep-learning models, alongside scripts for hyperparameter tuning and evaluation.
 
